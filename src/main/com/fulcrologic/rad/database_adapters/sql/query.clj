@@ -12,6 +12,7 @@
     [com.fulcrologic.fulcro.algorithms.do-not-use :refer [deep-merge]]
     [clojure.string :as str]
     [edn-query-language.core :as eql]
+    [jsonista.core :as j]
     [next.jdbc.sql :as jdbc.sql]
     [next.jdbc.sql.builder :as jdbc.builder]
     [taoensso.encore :as enc]
@@ -31,25 +32,25 @@
     :else (str "'" v "'")))
 
 (>defn to-many-join-column-query
-  [{::attr/keys [key->attribute] :as env} {::attr/keys [target cardinality identities qualified-key] :as attr} ids]
-  [any? ::attr/attribute coll? => (? (s/tuple string? ::attr/attributes))]
-  (log/spy :debug qualified-key)
-  (when (= :many (log/spy :debug cardinality))
-    (do
-      (when (not= 1 (count identities))
-        (throw (ex-info "Reference column must have exactly 1 ::attr/identities entry." {:k qualified-key})))
-      (enc/if-let [reverse-target-attr (key->attribute (first identities)) ; :account/id
-                   target-attr         (key->attribute target) ; :address/id
-                   rev-target-table    (table-name key->attribute reverse-target-attr) ; account
-                   rev-target-column   (column-name reverse-target-attr) ; id
-                   column              (column-name key->attribute attr) ; account_addresses_account_id
-                   table               (table-name key->attribute target-attr) ; address
-                   target-id-column    (column-name target-attr) ; id
-                   id-list             (str/join "," (map q ids))]
-        [(format "SELECT %1$s.%2$s AS c0, array_agg(%3$s.%4$s) AS c1 FROM %1$s LEFT JOIN %3$s ON %1$s.%2$s = %3$s.%5$s WHERE %1$s.%2$s IN (%6$s) GROUP BY %1$s.%2$s"
-           rev-target-table rev-target-column table target-id-column column id-list)
-         [reverse-target-attr attr]]
-        (throw (ex-info "Cannot create to-many reference column." {:k qualified-key}))))))
+       [{::attr/keys [key->attribute] :as env} {::attr/keys [target cardinality identities qualified-key] :as attr} ids]
+       [any? ::attr/attribute coll? => (? (s/tuple string? ::attr/attributes))]
+       (log/spy :debug qualified-key)
+       (when (= :many (log/spy :debug cardinality))
+         (do
+           (when (not= 1 (count identities))
+             (throw (ex-info "Reference column must have exactly 1 ::attr/identities entry." {:k qualified-key})))
+           (enc/if-let [reverse-target-attr (key->attribute (first identities)) ; :account/id
+                        target-attr         (key->attribute target) ; :address/id
+                        rev-target-table    (table-name key->attribute reverse-target-attr) ; account
+                        rev-target-column   (column-name reverse-target-attr) ; id
+                        column              (column-name key->attribute attr) ; account_addresses_account_id
+                        table               (table-name key->attribute target-attr) ; address
+                        target-id-column    (column-name target-attr) ; id
+                        id-list             (str/join "," (map q ids))]
+             [(format "SELECT %1$s.%2$s AS c0, JSON_ARRAYAGG(%3$s.%4$s) AS c1 FROM %1$s LEFT JOIN %3$s ON %1$s.%2$s = %3$s.%5$s WHERE %1$s.%2$s IN (%6$s) GROUP BY %1$s.%2$s"
+                      rev-target-table rev-target-column table target-id-column column id-list)
+              [reverse-target-attr attr]]
+             (throw (ex-info "Cannot create to-many reference column." {:k qualified-key}))))))
 
 (>defn base-property-query
   [env {id-key ::attr/qualified-key :as id-attr} attrs ids]
@@ -79,7 +80,8 @@
       (log/spy :info {target value})
 
       (= :ref type)
-      (vec (keep (fn [id] (when id {target id})) value))
+      (vec (keep (fn [id] (when id {target id}))
+                 value))
 
       :else (sql->form-value attr value))))
 
@@ -87,16 +89,16 @@
   (when-not (contains? row :c0)
     (log/error "Row is missing :cn entries!" row))
   (:result
-    (reduce
-      (fn [{:keys [index result]} {::attr/keys [qualified-key] :as attr}]
-        (let [value (interpret-result (get row (keyword (str "c" index))) attr)]
-          {:index  (inc index)
-           :result (if (nil? value)
-                     result
-                     (assoc result qualified-key value))}))
-      {:index  0
-       :result {}}
-      attrs)))
+   (reduce
+    (fn [{:keys [index result]} {::attr/keys [qualified-key] :as attr}]
+      (let [value (interpret-result (get row (keyword (str "c" index))) attr)]
+        {:index  (inc index)
+         :result (if (nil? value)
+                   result
+                   (assoc result qualified-key value))}))
+    {:index  0
+     :result {}}
+    attrs)))
 
 (>defn sql-results->edn-results
   [rows attrs]
@@ -121,8 +123,10 @@
   "An example column-reader that still uses `.getObject` but expands CLOB
   columns into strings."
   [^ResultSet rs ^ResultSetMetaData md ^Integer i]
-  (let [col-type (.getColumnType md i)]
+  (let [col-type (.getColumnType md i)
+        col-type-name (.getColumnTypeName md i)]
     (cond
+      (= col-type-name "JSON") (j/read-value (.getObject rs i))
       (= col-type Types/CLOB) (rs/clob->string (.getClob rs i))
       (#{Types/TIMESTAMP Types/TIMESTAMP_WITH_TIMEZONE} col-type) (.getTimestamp rs i)
       :else (.getObject rs i))))
@@ -131,33 +135,34 @@
 (def row-builder (rs/as-maps-adapter rs/as-unqualified-lower-maps RAD-column-reader))
 
 (>defn eql-query!
-  [{::attr/keys    [key->attribute]
-    ::rad.sql/keys [connection-pools]
-    :as            env} id-attribute eql-query resolver-input]
-  [any? ::attr/attribute ::eql/query coll? => (? coll?)]
-  (let [schema            (::attr/schema id-attribute)
-        datasource        (or (get connection-pools schema) (throw (ex-info "Data source missing for schema" {:schema schema})))
-        id-key            (::attr/qualified-key id-attribute)
-        attrs-of-interest (eql->attrs env schema eql-query)
-        to-many-joins     (filterv #(and (= :many (::attr/cardinality %))
-                                      (= :ref (::attr/type %))) attrs-of-interest)
-        ids               (if (map? resolver-input)
-                            (if-let [id (get resolver-input id-key)] [id] [])
-                            (vec (keep #(get % id-key) resolver-input)))]
-    (when (seq ids)
-      (let [[base-query base-attributes] (base-property-query env id-attribute attrs-of-interest ids)
-            joins-to-run          (mapv #(to-many-join-column-query env % ids) to-many-joins)
-            one?                  (map? resolver-input)
-            rows                  (log/spy :debug (sql/query datasource (log/spy :debug [base-query]) {:builder-fn row-builder}))
-            base-result-map-by-id (log/spy :debug (enc/keys-by id-key (log/spy :debug (sql-results->edn-results rows base-attributes))))
-            results-by-id         (reduce
-                                    (fn [result [join-query join-attributes]]
-                                      (let [join-rows         (log/spy :debug (sql/query datasource [join-query] {:builder-fn row-builder}))
-                                            join-eql-results  (log/spy :debug (sql-results->edn-results join-rows join-attributes))
-                                            join-result-by-id (log/spy :debug (enc/keys-by id-key join-eql-results))]
-                                        (deep-merge result join-result-by-id)))
-                                    base-result-map-by-id
-                                    joins-to-run)]
-        (if one?
-          (first (vals results-by-id))
-          (mapv results-by-id ids))))))
+       [{::attr/keys    [key->attribute]
+         ::rad.sql/keys [connection-pools]
+         :as            env} id-attribute eql-query resolver-input]
+       [any? ::attr/attribute ::eql/query coll? => (? coll?)]
+       (let [schema            (::attr/schema id-attribute)
+             datasource        (or (get connection-pools schema) (throw (ex-info "Data source missing for schema" {:schema schema})))
+             id-key            (::attr/qualified-key id-attribute)
+             attrs-of-interest (eql->attrs env schema eql-query)
+             to-many-joins     (filterv #(and (= :many (::attr/cardinality %))
+                                              (= :ref (::attr/type %))) attrs-of-interest)
+             ids               (if (map? resolver-input)
+                                 (if-let [id (get resolver-input id-key)] [id] [])
+                                 (vec (keep #(get % id-key) resolver-input)))]
+         (when (seq ids)
+           (let [[base-query base-attributes] (base-property-query env id-attribute attrs-of-interest ids)
+                 joins-to-run          (mapv #(to-many-join-column-query env % ids) to-many-joins)
+                 one?                  (map? resolver-input)
+                 rows                  (log/spy :debug (sql/query datasource (log/spy :debug [base-query]) {:builder-fn row-builder}))
+                 edn-result (log/spy :debug (sql-results->edn-results rows base-attributes))
+                 base-result-map-by-id (log/spy :debug (enc/keys-by id-key edn-result))
+                 results-by-id         (reduce
+                                        (fn [result [join-query join-attributes]]
+                                          (let [join-rows         (log/spy :debug (sql/query datasource (log/spy :debug [join-query]) {:builder-fn row-builder}))
+                                                join-eql-results  (log/spy :debug (sql-results->edn-results join-rows join-attributes))
+                                                join-result-by-id (log/spy :debug (enc/keys-by id-key join-eql-results))]
+                                            (deep-merge result join-result-by-id)))
+                                        base-result-map-by-id
+                                        joins-to-run)]
+             (if one?
+               (first (vals results-by-id))
+               (mapv results-by-id ids))))))
