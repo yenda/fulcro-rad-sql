@@ -11,6 +11,13 @@
   the snake_case name of the attribute."
   :com.fulcrologic.rad.database-adapters.sql/column-name)
 
+(def ref
+  "REQUIRED when cardinality is `:many`.
+  When an entity A has a `:many` cardinality and is targeting an entity B in a many-to-many relationship,
+  there will be an associative table represented by an entity C.
+  ref is the qualified key of the attribute of C that references A."
+  :com.fulcrologic.rad.database-adapters.sql/ref)
+
 (def max-length
   "Attribute option. The max length for attributes that are internally represented by strings. This
    includes keywords, symbols, password, enumerations, and raw strings. This is ONLY used when this adapter

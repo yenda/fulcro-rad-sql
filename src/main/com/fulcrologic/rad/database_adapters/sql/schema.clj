@@ -41,26 +41,26 @@
   "Get the column name for the given attribute."
   ([k->attr {::attr/keys [identities cardinality type] :as attr}]
    (or
-     (::rad.sql/column-name attr)
-     (if (and (= :many cardinality) (= :ref type))
-       (do
-         (when-not (= 1 (count identities))
-           (throw (ex-info "Cannot calculating column name that has multiple identities." {:attr attr})))
-         (enc/if-let [reverse-target-attr (k->attr (first identities))
-                      rev-target-table    (table-name k->attr reverse-target-attr)
-                      rev-target-column   (column-name reverse-target-attr)
-                      origin-table        (table-name k->attr attr)
-                      origin-column       (some-> attr ::attr/qualified-key name csk/->snake_case)]
-           ;; account_addresses_account_id
-           (str/join "_" [origin-table origin-column rev-target-table rev-target-column])))
-       (column-name attr))))
+    (::rad.sql/column-name attr)
+    (if (and (= :many cardinality) (= :ref type))
+      (do
+        (when-not (= 1 (count identities))
+          (throw (ex-info "Cannot calculating column name that has multiple identities." {:attr attr})))
+        (enc/if-let [reverse-target-attr (k->attr (first identities))
+                     rev-target-table    (table-name k->attr reverse-target-attr)
+                     rev-target-column   (column-name reverse-target-attr)
+                     origin-table        (table-name k->attr attr)
+                     origin-column       (some-> attr ::attr/qualified-key name csk/->snake_case)]
+          ;; account_addresses_account_id
+          (str/join "_" [origin-table origin-column rev-target-table rev-target-column])))
+      (column-name attr))))
   ([{::attr/keys    [qualified-key cardinality type]
      ::rad.sql/keys [column-name]}]
-   (when (and (= :many cardinality) (= :ref type))
-     (throw (ex-info "Cannot calculate column name for to-many ref without k->attr." {:attr qualified-key})))
+   #_(when (and (= :many cardinality) (= :ref type))
+       (throw (ex-info "Cannot calculate column name for to-many ref without k->attr." {:attr qualified-key})))
    (or
-     column-name
-     (some-> qualified-key name csk/->snake_case))))
+    column-name
+    (some-> qualified-key name csk/->snake_case))))
 
 (defn sequence-name [id-attribute]
   (str (table-name id-attribute) "_" (column-name id-attribute) "_seq"))

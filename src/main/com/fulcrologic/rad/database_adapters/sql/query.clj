@@ -53,18 +53,30 @@
              (throw (ex-info "Cannot create to-many reference column." {:k qualified-key}))))))
 
 (>defn base-property-query
-  [env {id-key ::attr/qualified-key :as id-attr} attrs ids]
-  [any? ::attr/attribute ::attr/attributes coll? => (s/tuple string? ::attr/attributes)]
-  (let [attrs       (filter #(or
-                               (not= :ref (::attr/type %))
-                               (not= :many (::attr/cardinality %))) attrs)
-        table       (table-name id-attr)
-        id-column   (column-name id-attr)
-        table-attrs (into [id-attr]
-                      (filter #(contains? (::attr/identities %) id-key)) attrs)
-        columns     (str/join "," (map-indexed (fn [idx a] (str table "." (column-name a) " AS c" idx)) table-attrs))
-        id-list     (str/join "," (map q ids))]
-    [(format "SELECT %s FROM %s WHERE %s IN (%s)" columns table id-column id-list) table-attrs]))
+       [env {id-key ::attr/qualified-key :as id-attr} attrs ids]
+       [any? ::attr/attribute ::attr/attributes coll? => (s/tuple string? ::attr/attributes)]
+       (let [attrs       (filter #(or
+                                   (not= :ref (::attr/type %))
+                                   (not= :many (::attr/cardinality %))) attrs)
+             table       (table-name id-attr)
+             id-column   (column-name id-attr)
+             table-attrs (into [id-attr]
+                               (filter #(contains? (::attr/identities %) id-key)) attrs)
+             columns     (str/join "," (map-indexed (fn [idx a] (str table "." (column-name a) " AS c" idx)) table-attrs))
+             id-list     (str/join "," (map q ids))]
+         [(format "SELECT %s FROM %s WHERE %s IN (%s)" columns table id-column id-list) table-attrs]))
+
+(>defn base-property-query-by-ref
+       [env { :as id-attr} {target-key ::attr/target id-key ::attr/qualified-key :as ref-attribute} target-attribute attrs ids]
+       [any? ::attr/attribute ::attr/attribute ::attr/attribute ::attr/attributes coll? => (s/tuple string? ::attr/attributes)]
+       (let [;;TODO: should be the target table
+             table       (table-name target-attribute)
+             id-column   (column-name ref-attribute)
+             table-attrs (into [target-attribute]
+                               (filter #(contains? (::attr/identities %) target-key)) attrs)
+             columns     (str/join "," (map-indexed (fn [idx a] (str table "." (column-name a) " AS c" idx)) table-attrs))
+             id-list     (str/join "," (map q ids))]
+         [(format "SELECT %s FROM %s WHERE %s IN (%s)" columns table id-column id-list) table-attrs]))
 
 (defn sql->form-value [{::attr/keys    [type]
                         ::rad.sql/keys [sql->form-value]} sql-value]
@@ -77,7 +89,7 @@
   (when (not (nil? value))
     (cond
       (and (= :ref type) (not= :many cardinality))
-      (log/spy :info {target value})
+      #_(log/spy :info {target value}) value
 
       (= :ref type)
       (vec (keep (fn [id] (when id {target id}))
@@ -135,7 +147,7 @@
 (def row-builder (rs/as-maps-adapter rs/as-unqualified-lower-maps RAD-column-reader))
 
 (>defn eql-query!
-       [{::attr/keys    [key->attribute]
+       [{::attr/keys    [key->attribute attributes]
          ::rad.sql/keys [connection-pools]
          :as            env} id-attribute eql-query resolver-input]
        [any? ::attr/attribute ::eql/query coll? => (? coll?)]
@@ -143,26 +155,41 @@
              datasource        (or (get connection-pools schema) (throw (ex-info "Data source missing for schema" {:schema schema})))
              id-key            (::attr/qualified-key id-attribute)
              attrs-of-interest (eql->attrs env schema eql-query)
-             to-many-joins     (filterv #(and (= :many (::attr/cardinality %))
-                                              (= :ref (::attr/type %))) attrs-of-interest)
              ids               (if (map? resolver-input)
                                  (if-let [id (get resolver-input id-key)] [id] [])
                                  (vec (keep #(get % id-key) resolver-input)))]
          (when (seq ids)
            (let [[base-query base-attributes] (base-property-query env id-attribute attrs-of-interest ids)
-                 joins-to-run          (mapv #(to-many-join-column-query env % ids) to-many-joins)
                  one?                  (map? resolver-input)
                  rows                  (log/spy :debug (sql/query datasource (log/spy :debug [base-query]) {:builder-fn row-builder}))
                  edn-result (log/spy :debug (sql-results->edn-results rows base-attributes))
-                 base-result-map-by-id (log/spy :debug (enc/keys-by id-key edn-result))
-                 results-by-id         (reduce
-                                        (fn [result [join-query join-attributes]]
-                                          (let [join-rows         (log/spy :debug (sql/query datasource (log/spy :debug [join-query]) {:builder-fn row-builder}))
-                                                join-eql-results  (log/spy :debug (sql-results->edn-results join-rows join-attributes))
-                                                join-result-by-id (log/spy :debug (enc/keys-by id-key join-eql-results))]
-                                            (deep-merge result join-result-by-id)))
-                                        base-result-map-by-id
-                                        joins-to-run)]
+                 results-by-id (log/spy :debug (enc/keys-by id-key edn-result))]
              (if one?
                (first (vals results-by-id))
                (mapv results-by-id ids))))))
+
+(>defn eql-query-by-ref!
+       [{::attr/keys    [key->attribute attributes target-attribute]
+         ::rad.sql/keys [connection-pools]
+         :as            env} id-attribute ref-attribute eql-query resolver-input]
+       [any? ::attr/attribute ::attr/attribute ::eql/query coll? => (? coll?)]
+       (let [schema            (::attr/schema id-attribute)
+             datasource        (or (get connection-pools schema) (throw (ex-info "Data source missing for schema" {:schema schema})))
+             id-key (::attr/qualified-key id-attribute) ;; :user/id
+             target-key (::attr/target ref-attribute) ;; :course.administrator/id
+             ref-key (::attr/qualified-key ref-attribute) ;; :user/administrated-courses
+             xoxo (::rad.sql/ref ref-attribute) ;; :course.administrator/user
+             attrs-of-interest attributes #_(eql->attrs env schema eql-query)
+             ;; TODO: something is wrong here
+             ids               (if (map? resolver-input)
+                                 (if-let [id (get resolver-input id-key)] [id] [])
+                                 (vec (keep #(get % id-key) resolver-input)))]
+         (when (seq ids)
+           (let [[base-query base-attributes] (base-property-query-by-ref env id-attribute ref-attribute target-attribute attrs-of-interest ids)
+
+                 rows                  (log/spy :debug (sql/query datasource (log/spy :debug [base-query]) {:builder-fn row-builder}))
+                 edn-result (log/spy :debug (sql-results->edn-results rows base-attributes))
+                 results-by-id (log/spy :debug (group-by xoxo edn-result))
+                 results-by-id (reduce-kv (fn [acc k v] (assoc acc {id-key k} {ref-key v})) {} results-by-id)
+                 ]
+             (mapv #(get results-by-id {id-key %}) ids)))))
