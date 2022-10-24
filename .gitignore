@@ -21,3 +21,5 @@ target
 .cpcache
 .shadow-cljs
 .clj-kondo/.cache
+.clj-kondo/com.fulcrologic/fulcro/*
+.lsp/.cache

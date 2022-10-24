@@ -6,23 +6,22 @@
   - Building custom queries based of off RAD attributes
   - Persisting data based off submitted form deltas"
   (:require
-    [com.fulcrologic.rad.attributes :as attr]
-    [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
-    [com.fulcrologic.rad.database-adapters.sql.schema :refer [column-name table-name]]
-    [com.fulcrologic.fulcro.algorithms.do-not-use :refer [deep-merge]]
-    [clojure.string :as str]
-    [edn-query-language.core :as eql]
-    [jsonista.core :as j]
-    [next.jdbc.sql :as jdbc.sql]
-    [next.jdbc.sql.builder :as jdbc.builder]
-    [taoensso.encore :as enc]
-    [taoensso.timbre :as log]
-    [com.fulcrologic.guardrails.core :refer [>defn => | ?]]
-    [clojure.set :as set]
-    [clojure.spec.alpha :as s]
-    [next.jdbc.sql :as sql]
-    [next.jdbc.result-set :as rs])
-  (:import (java.sql ResultSet ResultSetMetaData Clob Types)))
+   [clojure.spec.alpha :as s]
+   [clojure.string :as str]
+   [com.fulcrologic.guardrails.core :refer [=> >defn ?]]
+   [com.fulcrologic.rad.attributes :as attr]
+   [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
+   [com.fulcrologic.rad.database-adapters.sql.schema
+    :refer [column-name table-name]]
+   [edn-query-language.core :as eql]
+   [jsonista.core :as j]
+   [next.jdbc :as jdbc]
+   [next.jdbc.result-set :as rs]
+   [next.jdbc.sql :as sql]
+   [taoensso.encore :as enc]
+   [taoensso.timbre :as log])
+  (:import
+   (java.sql ResultSet ResultSetMetaData Types)))
 
 (defn q [v]
   (cond
@@ -66,17 +65,18 @@
              id-list     (str/join "," (map q ids))]
          [(format "SELECT %s FROM %s WHERE %s IN (%s)" columns table id-column id-list) table-attrs]))
 
-(>defn base-property-query-by-ref
-       [env { :as id-attr} {target-key ::attr/target id-key ::attr/qualified-key :as ref-attribute} target-attribute attrs ids]
-       [any? ::attr/attribute ::attr/attribute ::attr/attribute ::attr/attributes coll? => (s/tuple string? ::attr/attributes)]
-       (let [;;TODO: should be the target table
-             table       (table-name target-attribute)
-             id-column   (column-name ref-attribute)
-             table-attrs (into [target-attribute]
-                               (filter #(contains? (::attr/identities %) target-key)) attrs)
-             columns     (str/join "," (map-indexed (fn [idx a] (str table "." (column-name a) " AS c" idx)) table-attrs))
-             id-list     (str/join "," (map q ids))]
-         [(format "SELECT %s FROM %s WHERE %s IN (%s)" columns table id-column id-list) table-attrs]))
+(>defn base-property-query-by-attribute
+       [relationship-attribute
+        outputs
+        attributes]
+       [::attr/attribute (s/coll-of keyword?) ::attr/attributes => (s/tuple string? ::attr/attributes)]
+       (let [table       (table-name (:com.fulcrologic.rad.database-adapters.sql.resolvers-pathom3/entity-id relationship-attribute))
+             id-column   (column-name relationship-attribute)
+             table-attrs (filter (fn [attribute]
+                                   ((into #{} outputs) (::attr/qualified-key attribute)))
+                                 attributes)
+             columns     (str/join "," (map-indexed (fn [idx a] (str table "." (column-name a) " AS c" idx)) table-attrs))]
+         [(format "SELECT %s FROM %s WHERE %s IN (?)" columns table id-column) table-attrs]))
 
 (defn sql->form-value [{::attr/keys    [type]
                         ::rad.sql/keys [sql->form-value]} sql-value]
@@ -144,29 +144,19 @@
       :else (.getObject rs i))))
 
 ;; Type coercion is handled by the row builder
-(def row-builder (rs/as-maps-adapter rs/as-unqualified-lower-maps RAD-column-reader))
+(def row-builder (rs/as-maps-adapter rs/as-unqualified-kebab-maps RAD-column-reader))
 
 (>defn eql-query!
        [{::attr/keys    [key->attribute attributes]
          ::rad.sql/keys [connection-pools]
-         :as            env} id-attribute eql-query resolver-input]
-       [any? ::attr/attribute ::eql/query coll? => (? coll?)]
-       (let [schema            (::attr/schema id-attribute)
-             datasource        (or (get connection-pools schema) (throw (ex-info "Data source missing for schema" {:schema schema})))
-             id-key            (::attr/qualified-key id-attribute)
-             attrs-of-interest (eql->attrs env schema eql-query)
-             ids               (if (map? resolver-input)
-                                 (if-let [id (get resolver-input id-key)] [id] [])
-                                 (vec (keep #(get % id-key) resolver-input)))]
-         (when (seq ids)
-           (let [[base-query base-attributes] (base-property-query env id-attribute attrs-of-interest ids)
-                 one?                  (map? resolver-input)
-                 rows                  (log/spy :debug (sql/query datasource (log/spy :debug [base-query]) {:builder-fn row-builder}))
-                 edn-result (log/spy :debug (sql-results->edn-results rows base-attributes))
-                 results-by-id (log/spy :debug (enc/keys-by id-key edn-result))]
-             (if one?
-               (first (vals results-by-id))
-               (mapv results-by-id ids))))))
+         :as            env}
+        query
+        schema
+        resolver-input]
+       [any? vector? keyword? coll? => (? coll?)]
+       (let [datasource        (or (get connection-pools schema) (throw (ex-info "Data source missing for schema" {:schema schema})))
+             rows                  (log/spy :debug (jdbc/execute! datasource query {:builder-fn row-builder}))]
+         rows))
 
 (>defn eql-query-by-ref!
        [{::attr/keys    [key->attribute attributes target-attribute]
@@ -183,9 +173,10 @@
              ;; TODO: something is wrong here
              ids               (if (map? resolver-input)
                                  (if-let [id (get resolver-input id-key)] [id] [])
-                                 (vec (keep #(get % id-key) resolver-input)))]
+                                 (vec (keep #(get % id-key) resolver-input)))
+             ]
          (when (seq ids)
-           (let [[base-query base-attributes] (base-property-query-by-ref env id-attribute ref-attribute target-attribute attrs-of-interest ids)
+           (let [[base-query base-attributes] (base-property-query-by-attribute env id-attribute ref-attribute target-attribute attrs-of-interest ids)
 
                  rows                  (log/spy :debug (sql/query datasource (log/spy :debug [base-query]) {:builder-fn row-builder}))
                  edn-result (log/spy :debug (sql-results->edn-results rows base-attributes))
@@ -193,3 +184,26 @@
                  results-by-id (reduce-kv (fn [acc k v] (assoc acc {id-key k} {ref-key v})) {} results-by-id)
                  ]
              (mapv #(get results-by-id {id-key %}) ids)))))
+
+(>defn eql-query-by-attribute!
+       [{::attr/keys    [key->attribute attributes target-attribute]
+         ::rad.sql/keys [connection-pools]
+         :as            env}
+        {::attr/keys [target] :as relationship-attribute}
+        base-query
+        base-attributes
+        eql-query
+        resolver-input]
+       [any? ::attr/attribute string?  ::attr/attributes ::eql/query coll? => (? coll?)]
+       (let [schema            (::attr/schema relationship-attribute)
+             datasource        (or (get connection-pools schema) (throw (ex-info "Data source missing for schema" {:schema schema})))
+             id-key (::attr/qualified-key relationship-attribute)
+             ids               (if (map? resolver-input)
+                                 (if-let [id (get resolver-input target)] [id] [])
+                                 (vec (keep #(get % target) resolver-input)))]
+         (when (seq ids)
+           (let [id-list     (str/join "," (map q ids))
+                 rows (log/spy :debug (sql/query datasource (log/spy :debug [base-query id-list]) {:builder-fn row-builder}))
+                 edn-result (log/spy :debug (sql-results->edn-results rows base-attributes))]
+             edn-result
+             #_(mapv #(get results-by-id {id-key %}) ids)))))

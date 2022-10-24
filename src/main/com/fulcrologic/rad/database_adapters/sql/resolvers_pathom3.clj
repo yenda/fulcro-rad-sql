@@ -1,54 +1,43 @@
 (ns com.fulcrologic.rad.database-adapters.sql.resolvers-pathom3
   (:require
-    [clojure.pprint :refer [pprint]]
-    [com.fulcrologic.rad.authorization :as auth]
-    [com.fulcrologic.rad.attributes :as attr]
-    [com.fulcrologic.rad.form :as rad.form]
-    [com.fulcrologic.rad.options-util :refer [?!]]
-    [com.fulcrologic.guardrails.core :refer [>defn => |]]
-    [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
-    [com.fulcrologic.rad.database-adapters.sql.query :as sql.query]
-    [com.fulcrologic.rad.database-adapters.sql.schema :as sql.schema]
-    [taoensso.encore :as enc]
-    [taoensso.timbre :as log]
-    [com.wsscode.pathom3.connect.operation :as pco]
-    [next.jdbc.sql :as jdbc.sql]
-    [clojure.spec.alpha :as s]
-    [next.jdbc :as jdbc]
+   [clojure.set :as set]
+   [clojure.string :as str]
+   [com.fulcrologic.rad.attributes :as attr]
+   [com.fulcrologic.rad.authorization :as auth]
+   [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
+   [com.fulcrologic.rad.database-adapters.sql.query :as sql.query]
+   [com.wsscode.pathom3.connect.built-in.resolvers :as pbir]
+   [com.wsscode.pathom3.connect.operation :as pco]
+   [honey.sql :as sql]
+   [taoensso.encore :as enc]
+   [taoensso.timbre :as log]))
 
-    ;; IMPORTANT: This turns on instant coercion:
-    [next.jdbc.date-time]
+(defn get-column [attribute]
+  (or (::rad.sql/column-name attribute)
+      (-> (::attr/qualified-key attribute) name keyword)))
 
-    [com.fulcrologic.fulcro.algorithms.tempid :as tempid]
-    [com.fulcrologic.rad.ids :as ids]
-    [clojure.string :as str]
-    [clojure.set :as set]
-    [edn-query-language.core :as eql]
-    [com.fulcrologic.rad.database-adapters.sql.vendor :as vendor]))
+(defn get-table [attribute]
+  (::rad.sql/table attribute))
 
-(defn entity-query
-  "The entity query used by the pathom resolvers."
-  [{::attr/keys [id-attribute key->attribute] :as env} input]
-  (enc/if-let [query* (get env ::rad.sql/default-query)]
-    (let [result (sql.query/eql-query! env id-attribute query* input)]
-      result)
-    (do
-      (log/info "Unable to complete query.")
-      nil)))
+(defn get-outputs
+  [id-attribute-key id-attribute->attributes k->attr]
+  (let [id-attribute (k->attr id-attribute-key)
+        outputs (reduce (fn [acc attr]
+                          (if (= :many (::attr/cardinality attr))
+                            acc
+                            (conj acc attr)))
+                        [id-attribute]
+                        (id-attribute->attributes id-attribute))]
+    outputs))
 
-(defn entity-by-ref-query
-  "The entity query used by the pathom resolvers."
-  [{::attr/keys [id-attribute ref-attribute key->attribute] :as env} input]
-  (enc/if-let [query* (get env ::rad.sql/default-query)]
-    (let [result (sql.query/eql-query-by-ref! env id-attribute ref-attribute query* input)]
-      result)
-    (do
-      (log/info "Unable to complete query.")
-      nil)))
-
-(defn id-resolver [{::attr/keys [id-attribute attributes k->attr]}]
+(defn id-resolver [{::attr/keys [id-attribute id-attr->attributes attributes k->attr] :as c}]
   (enc/if-let [id-key  (::attr/qualified-key id-attribute)
-               outputs (conj (attr/attributes->eql attributes) id-key)
+               output-attributes (get-outputs id-key id-attr->attributes k->attr)
+               outputs (mapv ::attr/qualified-key output-attributes)
+               output-column->output-key (reduce (fn [acc output]
+                                                   (assoc acc (get-column output) (::attr/qualified-key output)))
+                                                 {}
+                                                 output-attributes)
                schema  (::attr/schema id-attribute)]
     (let [transform (::pco/transform id-attribute)
           op-name (symbol
@@ -57,80 +46,183 @@
       (pco/resolver op-name
                     (cond-> {::pco/output  outputs
                              ::pco/batch?  true
+                             ::pco/priority 1
                              ::pco/resolve (fn [env input]
-                                             (auth/redact env
-                                                          (log/spy :trace (entity-query
-                                                                           (assoc env
-                                                                                  ::attr/id-attribute id-attribute
-                                                                                  ::attr/schema schema
-                                                                                  ::rad.sql/default-query outputs)
-                                                                           (log/spy :trace input)))))
+                                             (let [ids (mapv id-key input)
+                                                   query (sql/format {:select (mapv get-column
+                                                                                    output-attributes)
+                                                                      :from (get-table id-attribute)
+                                                                      :where [:in (get-column id-attribute) ids]})
+                                                   rows (sql.query/eql-query! env
+                                                                              query
+                                                                              schema
+                                                                              input)
+                                                   results-by-id (reduce (fn [acc row]
+                                                                           (let [result (clojure.set/rename-keys row output-column->output-key)]
+                                                                             (assoc acc
+                                                                                    {id-key (id-key result)}
+                                                                                    result)))
+                                                                         {}
+                                                                         rows)
+                                                   results (mapv #(get results-by-id {id-key %}) ids)]
+                                               (auth/redact env
+                                                            results)))
                              ::pco/input [id-key]}
                       transform (assoc ::pco/transform transform))))
     (log/error
      "Unable to generate id-resolver. Attribute was missing schema, "
      "or could not be found" (::attr/qualified-key id-attribute))))
 
-(defn ref-resolver [{::attr/keys [id-attribute attributes ref-attribute k->attr]}]
-  (enc/if-let [id-key (::attr/qualified-key id-attribute)
-               ref-attribute-key (::attr/qualified-key ref-attribute)
-               ref-attribute-target (::attr/target ref-attribute)
-               outputs (conj (attr/attributes->eql attributes) id-key)
-               schema  (::attr/schema id-attribute)]
-    (let [transform (::pco/transform id-attribute)
+(defn one-to-one-relationship-resolver [{::attr/keys [qualified-key target schema]
+                                         ::rad.sql/keys [column-name]
+                                         :keys [target-attribute outputs]
+                                         :as relationship-attribute}
+                                        attributes
+                                        k->attr
+                                        id-attr->attributes]
+  (if target-attribute
+    (do
+      (throw (ex-info "resolution of one-to-one relationship with target attribute NOT IMPLEMENTED"
+                      {:relationship-attribute relationship-attribute})))
+    (let [_ (log/info "Building Pathom3 alias resolver from" qualified-key "to" target)
+          alias-resolver (pbir/alias-resolver qualified-key target)
+          _ (log/info "Building Pathom3 resolver for" qualified-key "by" target)
+          transform (::pco/transform relationship-attribute)
           op-name (symbol
-                   (str (namespace id-key))
-                   (str "one-by-" (str (str/replace (namespace ref-attribute-target) #"\." "-")) "-" (name ref-attribute-target) "-resolver"))]
-      (pco/resolver op-name
-                    (cond-> {::pco/output  outputs
-                             ::pco/batch?  true
-                             ::pco/resolve (fn [env input]
-                                             (auth/redact env
-                                                          (log/spy :trace (entity-by-ref-query
-                                                                           (assoc env
-                                                                                  ::attr/id-attribute id-attribute
-                                                                                  ::attr/ref-attribute ref-attribute
-                                                                                  ::attr/schema schema
-                                                                                  ::rad.sql/default-query outputs)
-                                                                           (log/spy :trace input)))))
-                             ::pco/input [ref-attribute-target]}
-                      transform (assoc ::pco/transform transform))))
-    (log/error
-     "Unable to generate join-by-id-resolver. Attribute was missing schema, "
-     "or could not be found" (::attr/qualified-key id-attribute))))
+                   (str (namespace qualified-key))
+                   (str "-by-" (str (str/replace (namespace target) #"\." "-")) "-" (name target) "-resolver"))
+          id-attribute (::entity-id relationship-attribute)
+          id-key  (::attr/qualified-key id-attribute)
+          output-attributes (get-outputs id-key id-attr->attributes k->attr)
+          outputs (mapv ::attr/qualified-key output-attributes)
+          output-column->output-key (reduce (fn [acc output]
+                                              (assoc acc (get-column output) (::attr/qualified-key output)))
+                                            {}
+                                            output-attributes)
+          schema  (::attr/schema relationship-attribute)
+          entity-by-attribute-resolver
+          (pco/resolver op-name
+                        (cond-> {::pco/output  outputs
+                                 ::pco/batch?  true
+                                 ::pco/resolve (fn [env input]
+                                                 (let [ids (mapv target input)
+                                                       query (sql/format {:select (mapv get-column
+                                                                                        output-attributes)
+                                                                          :from (get-table id-attribute)
+                                                                          :where [:in (get-column relationship-attribute) ids]})
+                                                       rows (sql.query/eql-query! env
+                                                                                  query
+                                                                                  schema
+                                                                                  input)
+                                                       results-by-id (reduce (fn [acc row]
+                                                                               (let [result (clojure.set/rename-keys row output-column->output-key)]
+                                                                                 (assoc acc
+                                                                                        {target (qualified-key result)}
+                                                                                        result)))
+                                                                             {}
+                                                                             rows)
+                                                       results (mapv #(get results-by-id {target %}) ids)]
+                                                   (auth/redact env
+                                                                results)))
+                                 ::pco/input [target]}
+                          transform (assoc ::pco/transform transform)))]
+      [alias-resolver entity-by-attribute-resolver])))
 
-(defn many-ref-resolver [{::attr/keys [id-attribute attributes ref-attribute k->attr id-attr->attributes]}]
-  (enc/if-let [id-attr-key->attributes (enc/map-keys ::attr/qualified-key id-attr->attributes)
-               attr-key->attribute (enc/map-keys ::attr/qualified-key attributes)
-               id-key (::attr/qualified-key id-attribute)
-               ref-attribute-key (::attr/qualified-key ref-attribute)
-               ref-attribute-target (::attr/target ref-attribute)
-               outputs [{ref-attribute-key (conj (mapv ::attr/qualified-key (id-attr-key->attributes ref-attribute-target)) id-key)}]
-               schema  (::attr/schema id-attribute)]
-    (let [transform (::pco/transform id-attribute)
+(defn one-to-many-relationship-resolver
+  [{::attr/keys [qualified-key target schema]
+    ::rad.sql/keys [column-name]
+    :keys [target-attribute outputs]
+    :as relationship-attribute}
+   attributes
+   k->attr
+   id-attr->attributes]
+  (if-not target-attribute
+    (do
+      (throw (ex-info "resolution of one-to-many relationship requires a target attribute"
+                      {:relationship-attribute relationship-attribute})))
+    (let [_ (log/info "Building Pathom3 alias for one-to-many resolver from" qualified-key "to" target)
+          alias-resolver (pbir/alias-resolver qualified-key target)
+          target-key (::attr/qualified-key target-attribute)
+          transform (::pco/transform relationship-attribute)
           op-name (symbol
-                   (str (namespace ref-attribute-key))
-                   (str (name ref-attribute-key) "-resolver"))]
-      (pco/resolver op-name
-                    (cond-> {::pco/output  outputs
-                             ::pco/batch?  true
-                             ::pco/resolve (fn [env input]
-                                             (auth/redact env
-                                                          (log/spy :trace (entity-by-ref-query
-                                                                           (assoc env
-                                                                                  ::attr/id-attribute id-attribute
-                                                                                  ::attr/attributes (id-attr-key->attributes ref-attribute-target)
-                                                                                  ::attr/ref-attribute (assoc ref-attribute ::rad.sql/column-name (::rad.sql/column-name (k->attr  (::rad.sql/ref ref-attribute))))
-                                                                                  ::attr/target-attribute (k->attr ref-attribute-target)
-                                                                                  ::attr/schema schema
+                   (str (namespace target-key))
+                   (str (name target-key) "-resolver"))
+          _ (log/info "Building Pathom3 resolver" op-name "for" qualified-key "by" target)
+          id-attribute (::entity-id relationship-attribute)
+          id-key  (::attr/qualified-key id-attribute)
+          output-attributes (get-outputs id-key id-attr->attributes k->attr)
+          outputs (mapv ::attr/qualified-key output-attributes)
+          output-column->output-key (reduce (fn [acc output]
+                                              (assoc acc (get-column output) (::attr/qualified-key output)))
+                                            {}
+                                            output-attributes)
+          schema  (::attr/schema relationship-attribute)
+          entity-by-attribute-resolver
+          (pco/resolver op-name
+                        (cond-> {::pco/output  [{target-key [id-key]}]
+                                 ::pco/batch?  true
+                                 ::pco/resolve (fn [env input]
+                                                 (let [ids (mapv target input)
+                                                       relationship-column (get-column relationship-attribute)
+                                                       query (sql/format {:select [relationship-column [[:json_arrayagg (get-column id-attribute)] :k]]
+                                                                          :from (get-table id-attribute)
+                                                                          :where [:in relationship-column ids]
+                                                                          :group-by [relationship-column]})
+                                                       rows (sql.query/eql-query! env
+                                                                                  query
+                                                                                  schema
+                                                                                  input)
+                                                       results-by-id (reduce (fn [acc row]
+                                                                               (let [result (clojure.set/rename-keys row output-column->output-key)]
+                                                                                 (assoc acc
+                                                                                        {target (qualified-key result)}
+                                                                                        {target-key (mapv (fn [k]
+                                                                                                            {id-key k}) (:k result))})))
+                                                                             {}
+                                                                             rows)
+                                                       results (mapv #(get results-by-id {target %}) ids)]
 
-                                                                                  ::rad.sql/default-query outputs)
-                                                                           (log/spy :trace input)))))
-                             ::pco/input [id-key]}
-                      transform (assoc ::pco/transform transform))))
-    (log/error
-     "Unable to generate join-by-id-resolver. Attribute was missing schema, "
-     "or could not be found" (::attr/qualified-key id-attribute))))
+                                                   (auth/redact env results)))
+                                 ::pco/input [target]}
+                          transform (assoc ::pco/transform transform)))]
+      [alias-resolver entity-by-attribute-resolver])))
+
+
+
+(defn relationships [attributes schema k->attr id-attribute->attributes]
+  (let [{:keys [one-to-one one-to-many]}
+        (->> attributes
+             (filter #(= schema (::attr/schema %)))
+             (filter #(= :one (::attr/cardinality %)))
+             (mapcat
+              (fn [attribute]
+                (for [entity-id (::attr/identities attribute)]
+                  (let [target-entity (k->attr (::attr/target attribute))
+                        target-entity-attributes  (id-attribute->attributes target-entity)
+                        target-attributes (filter #(and (::attr/cardinality %)
+                                                        (contains? (::attr/identities attribute)
+                                                                   (::attr/target %)))
+                                                  target-entity-attributes)
+                        #_(when (zero? (count target-attributes))
+                            (throw (ex-info "Target attribute not found for"
+                                            {:attribute attribute})))
+                        _ (when (> (count target-attributes) 1)
+                            (throw (ex-info "More than 1 target attribute not supported"
+                                            {:attribute attribute
+                                             :target-attributes target-attributes})))
+                        target-attribute (first target-attributes)
+                        relationship (if target-attribute
+                                       (keyword (str (name (::attr/cardinality attribute))
+                                                     "-to-"
+                                                     (name (::attr/cardinality target-attribute))))
+                                       :one-to-one)]
+                    (assoc attribute
+                           ::entity-id (k->attr entity-id)
+                           :outputs (get-outputs entity-id id-attribute->attributes k->attr)
+                           :target-attribute target-attribute
+                           :relationship relationship)))))
+             (group-by :relationship))]
+    [one-to-one one-to-many]))
 
 (defn generate-resolvers
   "Returns a sequence of resolvers that can resolve attributes from
@@ -152,57 +244,39 @@
            (log/info "Generating resolver for id key" (::attr/qualified-key id-attr)
                      "to resolve" (mapv ::attr/qualified-key attributes))
            (conj resolvers (id-resolver {::attr/id-attribute id-attr
+                                         ::attr/id-attr->attributes id-attr->attributes
                                          ::attr/attributes   attributes
                                          ::attr/k->attr      k->attr})))
          [] id-attr->attributes)
-        id-attr->ref-attributes
-        (->> attributes
-             (filter #(= schema (::attr/schema %)))
-             (filter #(#{:one} (::attr/cardinality %)))
-             (mapcat
-              (fn [attribute]
-                (for [entity-id (::attr/identities attribute)]
-                  (assoc attribute ::entity-id (k->attr entity-id)))))
-             (group-by ::entity-id))
-        #_#_ref-resolvers
-        (reduce-kv
-         (fn [resolvers id-attr attributes]
-           (reduce (fn [resolvers ref-attribute]
-                     (log/info "Generating ref resolver for one" (::attr/qualified-key ref-attribute)
-                               "for id key" (::attr/qualified-key id-attr))
-                     (conj resolvers (ref-resolver {::attr/id-attribute id-attr
-                                                    ::attr/ref-attribute ref-attribute
-                                                    ::attr/attributes   attributes
-                                                    ::attr/k->attr      k->attr})))
-                   resolvers
-                   attributes))
-         []
-         id-attr->ref-attributes)
 
-        id-attr->many-ref-attributes
-        (->> attributes
-             (filter #(= schema (::attr/schema %)))
-             (filter #(#{:many} (::attr/cardinality %)))
-             (mapcat
-              (fn [attribute]
-                (for [entity-id (::attr/identities attribute)]
-                  (assoc attribute ::entity-id (k->attr entity-id)))))
-             (group-by ::entity-id))
+        [one-to-one-relationships one-to-many-relationships] (relationships attributes schema k->attr id-attr->attributes)
+        one-to-one-resolvers
+        (reduce
+         (fn [resolvers relationship]
 
-        many-ref-resolvers
-        (reduce-kv
-         (fn [resolvers id-attr ref-attributes]
-           (reduce (fn [resolvers ref-attribute]
-                     (log/info "Generating resolver for many" (::attr/qualified-key ref-attribute)
-                               "for id key" (::attr/qualified-key id-attr))
-                     (conj resolvers (many-ref-resolver {::attr/id-attribute id-attr
-                                                         ::attr/id-attr->attributes id-attr->attributes
-                                                         ::attr/ref-attribute ref-attribute
-                                                         ::attr/ref-attributes   ref-attributes
-                                                         ::attr/attributes attributes
-                                                         ::attr/k->attr      k->attr})))
-                   resolvers
-                   ref-attributes))
+           (log/info "Generating resolvers for one to one relationship between"
+                     (-> relationship ::entity-id ::attr/qualified-key)
+                     "and" (::attr/target relationship))
+           (concat resolvers (one-to-one-relationship-resolver relationship
+                                                               attributes
+                                                               k->attr
+                                                               id-attr->attributes)))
          []
-         id-attr->many-ref-attributes)]
-    (vec (concat id-resolvers #_ref-resolvers many-ref-resolvers))))
+         one-to-one-relationships)
+
+        one-to-many-resolvers
+        (reduce
+         (fn [resolvers relationship]
+
+           (log/info "Generating resolvers for one to many relationship between"
+                     (-> relationship ::entity-id ::attr/qualified-key)
+                     "and" (::attr/target relationship))
+           (concat resolvers (one-to-many-relationship-resolver relationship
+                                                                attributes
+                                                                k->attr
+                                                                id-attr->attributes)))
+         []
+         one-to-many-relationships)
+
+        ]
+    (vec (concat id-resolvers one-to-one-resolvers one-to-many-resolvers))))
