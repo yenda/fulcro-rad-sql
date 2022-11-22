@@ -30,6 +30,7 @@
                         (id-attribute->attributes id-attribute))]
     outputs))
 
+
 (defn id-resolver [{::attr/keys [id-attribute id-attr->attributes attributes k->attr] :as c}]
   (enc/if-let [id-key  (::attr/qualified-key id-attribute)
                output-attributes (get-outputs id-key id-attr->attributes k->attr)
@@ -42,33 +43,53 @@
     (let [transform (::pco/transform id-attribute)
           op-name (symbol
                    (str (namespace id-key))
-                   (str (name id-key) "-resolver"))]
-      (pco/resolver op-name
-                    (cond-> {::pco/output  outputs
-                             ::pco/batch?  true
-                             ::pco/priority 1
-                             ::pco/resolve (fn [env input]
-                                             (let [ids (mapv id-key input)
-                                                   query (sql/format {:select (mapv get-column
-                                                                                    output-attributes)
-                                                                      :from (get-table id-attribute)
-                                                                      :where [:in (get-column id-attribute) ids]})
-                                                   rows (sql.query/eql-query! env
-                                                                              query
-                                                                              schema
-                                                                              input)
-                                                   results-by-id (reduce (fn [acc row]
-                                                                           (let [result (clojure.set/rename-keys row output-column->output-key)]
-                                                                             (assoc acc
-                                                                                    {id-key (id-key result)}
-                                                                                    result)))
-                                                                         {}
-                                                                         rows)
-                                                   results (mapv #(get results-by-id {id-key %}) ids)]
-                                               (auth/redact env
-                                                            results)))
-                             ::pco/input [id-key]}
-                      transform (assoc ::pco/transform transform))))
+                   (str (name id-key) "-resolver"))
+          authorization (get id-attribute :com.fulcrologic.rad.database-adapters.sql/authorization)
+          #_(keyword (namespace id-key) "authorized?")
+          unauthorized (keyword (namespace id-key) "unauthorized")
+          id-resolver (pco/resolver op-name
+                                    (cond-> {::pco/output  (if authorization
+                                                             [{unauthorized outputs}]
+                                                             outputs)
+                                             ::pco/batch?  true
+                                             ::pco/resolve (fn [env input]
+
+                                                             (let [ids (mapv id-key input)
+                                                                   query (sql/format {:select (mapv get-column
+                                                                                                    output-attributes)
+                                                                                      :from (get-table id-attribute)
+                                                                                      :where [:in (get-column id-attribute) ids]})
+                                                                   rows (sql.query/eql-query! env
+                                                                                              query
+                                                                                              schema
+                                                                                              input)
+                                                                   results-by-id (reduce (fn [acc row]
+                                                                                           (let [result (clojure.set/rename-keys row output-column->output-key)]
+                                                                                             (assoc acc
+                                                                                                    {id-key (id-key result)}
+                                                                                                    result)))
+                                                                                         {}
+                                                                                         rows)
+                                                                   results (mapv (fn [result]
+                                                                                   (if authorization
+                                                                                     {unauthorized (get results-by-id {id-key result})}
+                                                                                     (get results-by-id {id-key result}))
+                                                                                   ) ids)]
+                                                               (auth/redact env
+                                                                            results)))
+                                             ::pco/input [id-key]}
+                                      transform (assoc ::pco/transform transform)))]
+      (cond-> [id-resolver]
+        authorization (conj (pco/resolver  (symbol
+                                            (str (namespace id-key))
+                                            (str (name id-key) "-authorized-resolver"))
+                                           (cond-> {::pco/output  outputs
+                                                    #_#_::pco/batch?  true
+                                                    ::pco/resolve (fn [env input]
+                                                                    #_(mapv unauthorized input)
+                                                                    (unauthorized input))
+                                                    ::pco/input [{unauthorized (conj outputs authorization)}]}
+                                             transform (assoc ::pco/transform transform))))))
     (log/error
      "Unable to generate id-resolver. Attribute was missing schema, "
      "or could not be found" (::attr/qualified-key id-attribute))))
@@ -149,6 +170,11 @@
                    (str (name target-key) "-resolver"))
           _ (log/info "Building Pathom3 resolver" op-name "for" qualified-key "by" target)
           id-attribute (::entity-id relationship-attribute)
+          ;; if the entity on the "one" side of the one-to-many relationship
+          ;; requires authorization, we add it to the inputs of the resolver
+          authorization (-> target-attribute
+                            ::entity-id
+                            :com.fulcrologic.rad.database-adapters.sql/authorization)
           id-key  (::attr/qualified-key id-attribute)
           output-attributes (get-outputs id-key id-attr->attributes k->attr)
           outputs (mapv ::attr/qualified-key output-attributes)
@@ -183,7 +209,8 @@
                                                        results (mapv #(get results-by-id {target %}) ids)]
 
                                                    (auth/redact env results)))
-                                 ::pco/input [target]}
+                                 ::pco/input (cond-> [target]
+                                               authorization (conj authorization))}
                           transform (assoc ::pco/transform transform)))]
       [alias-resolver entity-by-attribute-resolver])))
 
@@ -203,7 +230,7 @@
                                                         (contains? (::attr/identities attribute)
                                                                    (::attr/target %)))
                                                   target-entity-attributes)
-                        #_(when (zero? (count target-attributes))
+                        _ (when (zero? (count target-attributes))
                             (throw (ex-info "Target attribute not found for"
                                             {:attribute attribute})))
                         _ (when (> (count target-attributes) 1)
@@ -243,10 +270,10 @@
          (fn [resolvers id-attr attributes]
            (log/info "Generating resolver for id key" (::attr/qualified-key id-attr)
                      "to resolve" (mapv ::attr/qualified-key attributes))
-           (conj resolvers (id-resolver {::attr/id-attribute id-attr
-                                         ::attr/id-attr->attributes id-attr->attributes
-                                         ::attr/attributes   attributes
-                                         ::attr/k->attr      k->attr})))
+           (concat resolvers (id-resolver {::attr/id-attribute id-attr
+                                           ::attr/id-attr->attributes id-attr->attributes
+                                           ::attr/attributes   attributes
+                                           ::attr/k->attr      k->attr})))
          [] id-attr->attributes)
 
         [one-to-one-relationships one-to-many-relationships] (relationships attributes schema k->attr id-attr->attributes)

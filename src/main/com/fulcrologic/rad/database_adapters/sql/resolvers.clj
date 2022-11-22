@@ -38,29 +38,42 @@
       (log/info "Unable to complete query.")
       nil)))
 
+(>defn attributes->eql
+       "Returns an EQL query for all of the attributes that are available for the given database-id"
+       [attrs]
+       [::attributes => vector?]
+       (reduce
+        (fn [outs {::keys [qualified-key type target cardinality]}]
+          (if (= :many cardinality)
+            outs
+            (conj outs qualified-key)))
+        []
+        attrs))
+
+
 (defn id-resolver [{::attr/keys [id-attribute attributes k->attr]}]
   (enc/if-let [id-key  (::attr/qualified-key id-attribute)
-               outputs (attr/attributes->eql attributes)
+               outputs (attributes->eql attributes)
                schema  (::attr/schema id-attribute)]
     (let [transform (:com.wsscode.pathom.connect/transform id-attribute)]
       (cond-> {:com.wsscode.pathom.connect/sym     (symbol
-                                                     (str (namespace id-key))
-                                                     (str (name id-key) "-resolver"))
+                                                    (str (namespace id-key))
+                                                    (str (name id-key) "-resolver"))
                :com.wsscode.pathom.connect/output  outputs
                :com.wsscode.pathom.connect/batch?  true
                :com.wsscode.pathom.connect/resolve (fn [env input]
                                                      (auth/redact env
-                                                       (log/spy :trace (entity-query
-                                                                         (assoc env
-                                                                           ::attr/id-attribute id-attribute
-                                                                           ::attr/schema schema
-                                                                           ::rad.sql/default-query outputs)
-                                                                         (log/spy :trace input)))))
+                                                                  (log/spy :trace (entity-query
+                                                                                   (assoc env
+                                                                                          ::attr/id-attribute id-attribute
+                                                                                          ::attr/schema schema
+                                                                                          ::rad.sql/default-query outputs)
+                                                                                   (log/spy :trace input)))))
                :com.wsscode.pathom.connect/input   #{id-key}}
         transform transform))
     (log/error
-      "Unable to generate id-resolver. Attribute was missing schema, "
-      "or could not be found" (::attr/qualified-key id-attribute))))
+     "Unable to generate id-resolver. Attribute was missing schema, "
+     "or could not be found" (::attr/qualified-key id-attribute))))
 
 
 (defn generate-resolvers
