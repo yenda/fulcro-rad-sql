@@ -156,24 +156,26 @@
       (let [{:sql/keys    [auto-create-missing? schema vendor]
              :flyway/keys [migrate? migrations]} dbconfig
             ^HikariDataSource pool (get connection-pools dbkey)
-            db                     {:datasource pool}
-            adapter                (case vendor
-                                     :postgresql (vendor/->PostgreSQLAdapter)
-                                     (vendor/->H2Adapter))]
+            db                     {:datasource pool}]
         (if pool
           (cond
             (and migrate? (seq migrations))
             (do
               (log/info (str "Processing Flywawy migrations for " dbkey))
-              (let [flyway (Flyway.)]
+              (let [flyway (-> (Flyway/configure)
+                               (.dataSource pool)
+                               (.locations (into-array String migrations))
+                               (.baselineOnMigrate true)
+                               (.load))]
                 (log/info "Migration location is set to: " migrations)
-                (.setLocations flyway (into-array String migrations))
-                (.setDataSource flyway pool)
-                (.setBaselineOnMigrate flyway true)
                 (.migrate flyway)))
 
             auto-create-missing?
-            (let [stmts (automatic-schema schema adapter all-attributes)]
+            (let [adapter                (case vendor
+                                           :postgresql (vendor/->PostgreSQLAdapter)
+                                           (vendor/->H2Adapter))
+                  stmts (automatic-schema schema adapter all-attributes)
+                  ]
               (log/info "Automatically trying to create SQL schema from attributes.")
               (doseq [s stmts]
                 (try

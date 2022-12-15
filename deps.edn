@@ -9,7 +9,8 @@
            seancorfield/next.jdbc              {:mvn/version "1.0.409"}
            metosin/jsonista {:mvn/version "0.3.6"}
            com.zaxxer/HikariCP                 {:mvn/version "3.4.2"}
-           org.flywaydb/flyway-core            {:mvn/version "4.2.0"}
+           org.flywaydb/flyway-core            {:mvn/version "9.8.3"}
+           org.flywaydb/flyway-mysql            {:mvn/version "9.9.0"}
            org.clojure/clojure                 {:mvn/version "1.10.1"}}
 
  :aliases {:test      {:extra-paths ["src/test"]
