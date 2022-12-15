@@ -101,12 +101,11 @@
                                         attributes
                                         k->attr
                                         id-attr->attributes]
-  (if target-attribute
-    (do
-      (throw (ex-info "resolution of one-to-one relationship with target attribute NOT IMPLEMENTED"
-                      {:relationship-attribute relationship-attribute})))
-    (let [_ (log/info "Building Pathom3 alias resolver from" qualified-key "to" target)
-          alias-resolver (pbir/alias-resolver qualified-key target)
+  (if-not target-attribute
+    (throw (ex-info "resolution of one-to-one relationship requires a target attribute"
+                    {:relationship-attribute relationship-attribute}))
+    (let [;; NOTE: there is no need for an alias the other side of the relationship
+          ;; will create a resolver
           _ (log/info "Building Pathom3 resolver for" qualified-key "by" target)
           transform (::pco/transform relationship-attribute)
           op-name (symbol
@@ -147,7 +146,7 @@
                                                                 results)))
                                  ::pco/input [target]}
                           transform (assoc ::pco/transform transform)))]
-      [alias-resolver entity-by-attribute-resolver])))
+      [entity-by-attribute-resolver])))
 
 (defn one-to-many-relationship-resolver
   [{::attr/keys [qualified-key target schema]

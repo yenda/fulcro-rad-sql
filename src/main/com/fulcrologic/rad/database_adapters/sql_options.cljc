@@ -11,6 +11,11 @@
   the snake_case name of the attribute."
   :com.fulcrologic.rad.database-adapters.sql/column-name)
 
+(def owns-ref?
+  "Attribute option. Required in one-to-one relationship to establish
+  on which side references the other. It can be both."
+  :com.fulcrologic.rad.database-adapters.sql/owns-ref?)
+
 (def max-length
   "Attribute option. The max length for attributes that are internally represented by strings. This
    includes keywords, symbols, password, enumerations, and raw strings. This is ONLY used when this adapter
