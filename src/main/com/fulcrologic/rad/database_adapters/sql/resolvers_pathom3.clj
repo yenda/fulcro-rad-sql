@@ -93,7 +93,7 @@
                     {:relationship-attribute relationship-attribute}))
     (let [;; NOTE: there is no need for an alias the other side of the relationship
           ;; will create a resolver
-          _ (log/info "Building Pathom3 resolver for" qualified-key "by" target)
+          _ (log/debug "Building Pathom3 resolver for" qualified-key "by" target)
           transform (::pco/transform relationship-attribute)
           op-name (symbol
                    (str (namespace qualified-key))
@@ -150,14 +150,14 @@
     (do
       (throw (ex-info "resolution of one-to-many relationship requires a target attribute"
                       {:relationship-attribute relationship-attribute})))
-    (let [_ (log/info "Building Pathom3 alias for one-to-many resolver from" qualified-key "to" target)
+    (let [_ (log/debug "Building Pathom3 alias for one-to-many resolver from" qualified-key "to" target)
           alias-resolver (pbir/alias-resolver qualified-key target)
           target-key (::attr/qualified-key target-attribute)
           transform (::pco/transform relationship-attribute)
           op-name (symbol
                    (str (namespace target-key))
                    (str (name target-key) "-resolver"))
-          _ (log/info "Building Pathom3 resolver" op-name "for" qualified-key "by" target)
+          _ (log/debug "Building Pathom3 resolver" op-name "for" qualified-key "by" target)
           id-attribute (::entity-id relationship-attribute)
           ;; if the entity on the "one" side of the one-to-many relationship
           ;; requires authorization, we add it to the inputs of the resolver
@@ -252,12 +252,12 @@
                                     (for [entity-id (::attr/identities attribute)]
                                       (assoc attribute ::entity-id (k->attr entity-id)))))
                                  (group-by ::entity-id))
-        _ (log/info "Generating resolvers")
+        _ (log/debug "Generating resolvers")
         id-resolvers
         (reduce-kv
          (fn [resolvers id-attr attributes]
-           (log/info "Generating resolver for id key" (::attr/qualified-key id-attr)
-                     "to resolve" (mapv ::attr/qualified-key attributes))
+           (log/debug "Generating resolver for id key" (::attr/qualified-key id-attr)
+                      "to resolve" (mapv ::attr/qualified-key attributes))
            (concat resolvers (id-resolver {::attr/id-attribute id-attr
                                            ::attr/id-attr->attributes id-attr->attributes
                                            ::attr/attributes   attributes
@@ -269,9 +269,9 @@
         (reduce
          (fn [resolvers relationship]
 
-           (log/info "Generating resolvers for one to one relationship between"
-                     (-> relationship ::entity-id ::attr/qualified-key)
-                     "and" (::attr/target relationship))
+           (log/debug "Generating resolvers for one to one relationship between"
+                      (-> relationship ::entity-id ::attr/qualified-key)
+                      "and" (::attr/target relationship))
            (concat resolvers (one-to-one-relationship-resolver relationship
                                                                attributes
                                                                k->attr
@@ -283,9 +283,9 @@
         (reduce
          (fn [resolvers relationship]
 
-           (log/info "Generating resolvers for one to many relationship between"
-                     (-> relationship ::entity-id ::attr/qualified-key)
-                     "and" (::attr/target relationship))
+           (log/debug "Generating resolvers for one to many relationship between"
+                      (-> relationship ::entity-id ::attr/qualified-key)
+                      "and" (::attr/target relationship))
            (concat resolvers (one-to-many-relationship-resolver relationship
                                                                 attributes
                                                                 k->attr
