@@ -10,7 +10,8 @@
    [com.wsscode.pathom3.connect.operation :as pco]
    [honey.sql :as sql]
    [taoensso.encore :as enc]
-   [taoensso.timbre :as log]))
+   [taoensso.timbre :as log]
+   [yenda.pathauth :as pa]))
 
 (defn get-column [attribute]
   (or (::rad.sql/column-name attribute)
@@ -44,13 +45,9 @@
           op-name (symbol
                    (str (namespace id-key))
                    (str (name id-key) "-resolver"))
-          authorization (get id-attribute :com.fulcrologic.rad.database-adapters.sql/authorization)
-          #_(keyword (namespace id-key) "authorized?")
-          unauthorized (keyword (namespace id-key) "unauthorized")
+          pa-auth (::pa/auth id-attribute)
           id-resolver (pco/resolver op-name
-                                    (cond-> {::pco/output  (if authorization
-                                                             [{unauthorized outputs}]
-                                                             outputs)
+                                    (cond-> {::pco/output outputs
                                              ::pco/batch?  true
                                              ::pco/resolve (fn [env input]
 
@@ -59,6 +56,7 @@
                                                                                                     output-attributes)
                                                                                       :from (get-table id-attribute)
                                                                                       :where [:in (get-column id-attribute) ids]})
+                                                                   #_ (log/info :SQL query)
                                                                    rows (sql.query/eql-query! env
                                                                                               query
                                                                                               schema
@@ -71,25 +69,14 @@
                                                                                          {}
                                                                                          rows)
                                                                    results (mapv (fn [result]
-                                                                                   (if authorization
-                                                                                     {unauthorized (get results-by-id {id-key result})}
-                                                                                     (get results-by-id {id-key result}))
-                                                                                   ) ids)]
+                                                                                   (get results-by-id {id-key result})) ids)]
                                                                (auth/redact env
                                                                             results)))
                                              ::pco/input [id-key]}
+                                      pa-auth (assoc ::pa/auth pa-auth
+                                                     ::pa/circular? true)
                                       transform (assoc ::pco/transform transform)))]
-      (cond-> [id-resolver]
-        authorization (conj (pco/resolver  (symbol
-                                            (str (namespace id-key))
-                                            (str (name id-key) "-authorized-resolver"))
-                                           (cond-> {::pco/output  outputs
-                                                    #_#_::pco/batch?  true
-                                                    ::pco/resolve (fn [env input]
-                                                                    #_(mapv unauthorized input)
-                                                                    (unauthorized input))
-                                                    ::pco/input [{unauthorized (conj outputs authorization)}]}
-                                             transform (assoc ::pco/transform transform))))))
+      [id-resolver])
     (log/error
      "Unable to generate id-resolver. Attribute was missing schema, "
      "or could not be found" (::attr/qualified-key id-attribute))))
@@ -120,6 +107,7 @@
                                             {}
                                             output-attributes)
           schema  (::attr/schema relationship-attribute)
+          pa-auth (::pa/auth id-attribute)
           entity-by-attribute-resolver
           (pco/resolver op-name
                         (cond-> {::pco/output  outputs
@@ -130,6 +118,7 @@
                                                                                         output-attributes)
                                                                           :from (get-table id-attribute)
                                                                           :where [:in (get-column relationship-attribute) ids]})
+                                                       #_ (log/info :SQL query)
                                                        rows (sql.query/eql-query! env
                                                                                   query
                                                                                   schema
@@ -145,6 +134,7 @@
                                                    (auth/redact env
                                                                 results)))
                                  ::pco/input [target]}
+                          pa-auth (assoc ::pa/auth pa-auth)
                           transform (assoc ::pco/transform transform)))]
       [entity-by-attribute-resolver])))
 
@@ -171,9 +161,7 @@
           id-attribute (::entity-id relationship-attribute)
           ;; if the entity on the "one" side of the one-to-many relationship
           ;; requires authorization, we add it to the inputs of the resolver
-          authorization (-> target-attribute
-                            ::entity-id
-                            :com.fulcrologic.rad.database-adapters.sql/authorization)
+          pa-auth (::pa/auth target-attribute)
           id-key  (::attr/qualified-key id-attribute)
           output-attributes (get-outputs id-key id-attr->attributes k->attr)
           outputs (mapv ::attr/qualified-key output-attributes)
@@ -193,6 +181,7 @@
                                                                           :from (get-table id-attribute)
                                                                           :where [:in relationship-column ids]
                                                                           :group-by [relationship-column]})
+                                                       #_ (log/info :SQL query)
                                                        rows (sql.query/eql-query! env
                                                                                   query
                                                                                   schema
@@ -208,8 +197,8 @@
                                                        results (mapv #(get results-by-id {target %}) ids)]
 
                                                    (auth/redact env results)))
-                                 ::pco/input (cond-> [target]
-                                               authorization (conj authorization))}
+                                 ::pco/input [target]}
+                          pa-auth (assoc ::pa/auth pa-auth)
                           transform (assoc ::pco/transform transform)))]
       [alias-resolver entity-by-attribute-resolver])))
 
