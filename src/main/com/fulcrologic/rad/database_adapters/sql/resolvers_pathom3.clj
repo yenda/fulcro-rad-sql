@@ -10,8 +10,7 @@
    [com.wsscode.pathom3.connect.operation :as pco]
    [honey.sql :as sql]
    [taoensso.encore :as enc]
-   [taoensso.timbre :as log]
-   [yenda.pathauth :as pa]))
+   [taoensso.timbre :as log]))
 
 (defn get-column [attribute]
   (or (::rad.sql/column-name attribute)
@@ -45,7 +44,6 @@
           op-name (symbol
                    (str (namespace id-key))
                    (str (name id-key) "-resolver"))
-          pa-auth (::pa/auth id-attribute)
           id-resolver (pco/resolver op-name
                                     (cond-> {::pco/output outputs
                                              ::pco/batch?  true
@@ -73,8 +71,6 @@
                                                                (auth/redact env
                                                                             results)))
                                              ::pco/input [id-key]}
-                                      pa-auth (assoc ::pa/auth pa-auth
-                                                     ::pa/circular? true)
                                       transform (assoc ::pco/transform transform)))]
       [id-resolver])
     (log/error
@@ -107,7 +103,6 @@
                                             {}
                                             output-attributes)
           schema  (::attr/schema relationship-attribute)
-          pa-auth (::pa/auth id-attribute)
           entity-by-attribute-resolver
           (pco/resolver op-name
                         (cond-> {::pco/output  outputs
@@ -134,7 +129,6 @@
                                                    (auth/redact env
                                                                 results)))
                                  ::pco/input [target]}
-                          pa-auth (assoc ::pa/auth pa-auth)
                           transform (assoc ::pco/transform transform)))]
       [entity-by-attribute-resolver])))
 
@@ -159,9 +153,6 @@
                    (str (name target-key) "-resolver"))
           _ (log/debug "Building Pathom3 resolver" op-name "for" qualified-key "by" target)
           id-attribute (::entity-id relationship-attribute)
-          ;; if the entity on the "one" side of the one-to-many relationship
-          ;; requires authorization, we add it to the inputs of the resolver
-          pa-auth (::pa/auth target-attribute)
           id-key  (::attr/qualified-key id-attribute)
           output-attributes (get-outputs id-key id-attr->attributes k->attr)
           outputs (mapv ::attr/qualified-key output-attributes)
@@ -198,7 +189,6 @@
 
                                                    (auth/redact env results)))
                                  ::pco/input [target]}
-                          pa-auth (assoc ::pa/auth pa-auth)
                           transform (assoc ::pco/transform transform)))]
       [alias-resolver entity-by-attribute-resolver])))
 
