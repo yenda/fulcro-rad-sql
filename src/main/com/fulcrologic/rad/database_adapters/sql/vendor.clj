@@ -15,11 +15,18 @@
   (relax-constraints! [_ ds] (jdbc/execute! ds ["SET REFERENTIAL_INTEGRITY FALSE"]))
   (add-referential-column-statement [this origin-table origin-column target-type target-table target-column]
     (format "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s REFERENCES %s(%s);\n"
-      origin-table origin-column target-type target-table target-column)))
+            origin-table origin-column target-type target-table target-column)))
+
+(deftype MariaDBAdapter []
+  VendorAdapter
+  (relax-constraints! [_ ds] (jdbc/execute! ds ["SET FOREIGN_KEY_CHECKS = 0;"]))
+  (add-referential-column-statement [this origin-table origin-column target-type target-table target-column]
+    (format "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s REFERENCES %s(%s);\n"
+            origin-table origin-column target-type target-table target-column)))
 
 (deftype PostgreSQLAdapter []
   VendorAdapter
   (relax-constraints! [_ ds] (jdbc/execute! ds ["SET CONSTRAINTS ALL DEFERRED"]))
   (add-referential-column-statement [this origin-table origin-column target-type target-table target-column]
     (format "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s REFERENCES %s(%s) DEFERRABLE INITIALLY DEFERRED;\n"
-      origin-table origin-column target-type target-table target-column)))
+            origin-table origin-column target-type target-table target-column)))

@@ -25,25 +25,28 @@
    (let [database-configs (get config ::sql/databases)
          default-adapter  (vendor/->H2Adapter)
          vendor-adapters  (reduce-kv
-                            (fn [acc k v]
-                              (let [{:sql/keys [vendor schema]} v
-                                    adapter (case vendor
-                                              :postgresql (do
-                                                            (log/info k "using PostgreSQL Adapter for schema" schema)
-                                                            (vendor/->PostgreSQLAdapter))
-                                              :h2 (do
-                                                    (log/info k "using H2 Adapter for schema" schema)
-                                                    (vendor/->H2Adapter))
-                                              default-adapter)]
-                                (assoc acc schema adapter)))
-                            {}
-                            database-configs)]
+                           (fn [acc k v]
+                             (let [{:sql/keys [vendor schema]} v
+                                   adapter (case vendor
+                                             :postgresql (do
+                                                           (log/info k "using PostgreSQL Adapter for schema" schema)
+                                                           (vendor/->PostgreSQLAdapter))
+                                             :h2 (do
+                                                   (log/info k "using H2 Adapter for schema" schema)
+                                                   (vendor/->H2Adapter))
+                                             :mariadb (do
+                                                        (log/info k "using MariaDB Adapter for schema" schema)
+                                                        (vendor/->MariaDBAdapter))
+                                             default-adapter)]
+                               (assoc acc schema adapter)))
+                           {}
+                           database-configs)]
      (fn [env]
        (cond-> (let [database-connection-map (database-mapper env)]
                  (assoc env
-                   ::sql/default-adapter default-adapter
-                   ::sql/adapters vendor-adapters
-                   ::sql/connection-pools database-connection-map))
+                        ::sql/default-adapter default-adapter
+                        ::sql/adapters vendor-adapters
+                        ::sql/connection-pools database-connection-map))
          base-wrapper (base-wrapper))))))
 
 (defn pathom-plugin
@@ -71,4 +74,3 @@
       (fn env-wrap-wrap-parser [parser]
         (fn env-wrap-wrap-internal [env tx]
           (parser (augment env) tx)))})))
-
