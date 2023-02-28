@@ -12,6 +12,7 @@
     [taoensso.encore :as enc]
     [taoensso.timbre :as log]
     [next.jdbc.sql :as jdbc.sql]
+    [honey.sql :as sql]
     [clojure.spec.alpha :as s]
     [next.jdbc :as jdbc]
 
@@ -204,38 +205,33 @@
                              (keys diff))
               old-val      (fn [{::attr/keys [qualified-key] :as attr}]
                              (some->> (get-in diff [qualified-key :before])
-                               (form->sql-value attr)))
+                                      (form->sql-value attr)))
               new-val      (fn [{::attr/keys [qualified-key schema] :as attr}]
                              (when (= schema schema-to-save)
                                (let [v (get-in diff [qualified-key :after])
                                      v (resolve-tempid-in-value tempids v)]
                                  (form->sql-value attr v))))
-              {:keys [columns values]} (reduce
-                                         (fn [{:keys [columns values] :as result} attr]
-                                           (let [new      (log/spy :trace (new-val attr))
-                                                 col-name (sql.schema/column-name attr)
-                                                 old      (old-val attr)]
-                                             (cond
-                                               (and old (nil? new))
-                                               (-> result
-                                                 (update :columns conj col-name)
-                                                 (update :values conj nil))
+              values (reduce
+                      (fn [result attr]
+                        (let [new      (log/spy :trace (new-val attr))
+                              col-name (keyword (sql.schema/column-name attr))
+                              old      (old-val attr)]
+                          (cond
+                            (and old (nil? new))
+                            (assoc result col-name nil)
 
-                                               (not (nil? new))
-                                               (-> result
-                                                 (update :columns conj col-name)
-                                                 (update :values conj new))
+                            (not (nil? new))
+                            (assoc result col-name new)
 
-                                               :else
-                                               result)))
-                                         {:columns []
-                                          :values  []}
-                                         scalar-attrs)
-              placeholders (str/join "," (map #(str % " = ?") columns))]
-          (when (seq columns)
-            (into
-              [(format "UPDATE %s SET %s WHERE %s = ?" table-name placeholders (sql.schema/column-name id-attr))]
-              (conj values id))))))))
+                            :else
+                            result)))
+                      {}
+                      scalar-attrs)]
+          (when (not (empty? values))
+            (sql/format {:update table-name
+                         :set values
+                         :where [:= (keyword (sql.schema/column-name id-attr)) id]})))))))
+
 
 (defn delta->scalar-updates [env schema delta]
   (let [stmts (vec (keep (fn [[ident diff]] (scalar-update env schema ident diff)) delta))]
@@ -293,15 +289,15 @@
           removes         (set/difference old-ids new-ids)
           add-stmts       (map (fn [id]
                                  [(format "UPDATE %s SET %s = ? WHERE %s = ?"
-                                    foreign-table column-name foreign-column)
+                                          foreign-table column-name foreign-column)
                                   target-id id]) adds)
           remove-stmts    (map (fn [id]
                                  (if delete-on-remove?
                                    [(format "DELETE FROM %s WHERE %s = ?"
-                                      foreign-table foreign-column) id]
+                                            foreign-table foreign-column) id]
                                    [(format "UPDATE %s SET %s = NULL WHERE %s = ?"
-                                      foreign-table column-name foreign-column) id]))
-                            removes)]
+                                            foreign-table column-name foreign-column) id]))
+                               removes)]
       (concat add-stmts remove-stmts))))
 
 (defn ref-updates [{::attr/keys [key->attribute] :as env} schema tempids [table id :as ident] diff]
@@ -319,8 +315,6 @@
     stmts))
 
 (defn save-form!
-  "Does all the necessary operations to persist mutations from the
-  form delta into the appropriate tables in the appropriate databases"
   [{::attr/keys    [key->attribute]
     ::rad.sql/keys [connection-pools adapters default-adapter]
     :as            env} {::rad.form/keys [delta]}]
