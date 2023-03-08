@@ -101,3 +101,6 @@
    has been deleted. The reference on which this option lives is just being changed
    to point to a different thing."
   :com.fulcrologic.rad.database-adapters.sql/delete-referent?)
+
+(def order-by
+  :com.fulcrologic.rad.database-adapters.sql/order-by)

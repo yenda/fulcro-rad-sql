@@ -161,35 +161,46 @@
                                             {}
                                             output-attributes)
           schema  (::attr/schema relationship-attribute)
+          order-by (some-> (::rad.sql/order-by target-attribute)
+                           k->attr
+                           get-column)
           entity-by-attribute-resolver
-          (pco/resolver op-name
-                        (cond-> {::pco/output  [{target-key [id-key]}]
-                                 ::pco/batch?  true
-                                 ::pco/resolve (fn [env input]
-                                                 (let [ids (mapv target input)
-                                                       relationship-column (get-column relationship-attribute)
-                                                       query (sql/format {:select [relationship-column [[:json_arrayagg (get-column id-attribute)] :k]]
-                                                                          :from (get-table id-attribute)
-                                                                          :where [:in relationship-column ids]
-                                                                          :group-by [relationship-column]})
-                                                       #_ (log/info :SQL query)
-                                                       rows (sql.query/eql-query! env
-                                                                                  query
-                                                                                  schema
-                                                                                  input)
-                                                       results-by-id (reduce (fn [acc row]
-                                                                               (let [result (clojure.set/rename-keys row output-column->output-key)]
-                                                                                 (assoc acc
-                                                                                        {target (qualified-key result)}
-                                                                                        {target-key (mapv (fn [k]
-                                                                                                            {id-key k}) (:k result))})))
-                                                                             {}
-                                                                             rows)
-                                                       results (mapv #(get results-by-id {target %}) ids)]
+          (pco/resolver
+           op-name
+           (cond-> {::pco/output  [{target-key [id-key]}]
+                    ::pco/batch?  true
+                    ::pco/resolve
+                    (fn [env input]
+                      (let [ids (mapv target input)
+                            relationship-column (get-column relationship-attribute)
+                            query (sql/format
+                                   {:select [relationship-column [[:json_arrayagg (if order-by
+                                                                                    [:order-by (get-column id-attribute) order-by]
+                                                                                    (get-column id-attribute))] :k]]
+                                    :from (get-table id-attribute)
+                                    :where [:in relationship-column ids]
+                                    :group-by [relationship-column]})
+                            _ (log/info :SQL query {:select [relationship-column [[:json_arrayagg (get-column id-attribute)] :k]]
+                                                    :from (get-table id-attribute)
+                                                    :where [:in relationship-column ids]
+                                                    :group-by [relationship-column]})
+                            rows (sql.query/eql-query! env
+                                                       query
+                                                       schema
+                                                       input)
+                            results-by-id (reduce (fn [acc row]
+                                                    (let [result (clojure.set/rename-keys row output-column->output-key)]
+                                                      (assoc acc
+                                                             {target (qualified-key result)}
+                                                             {target-key (mapv (fn [k]
+                                                                                 {id-key k}) (:k result))})))
+                                                  {}
+                                                  rows)
+                            results (mapv #(get results-by-id {target %}) ids)]
 
-                                                   (auth/redact env results)))
-                                 ::pco/input [target]}
-                          transform (assoc ::pco/transform transform)))]
+                        (auth/redact env results)))
+                    ::pco/input [target]}
+             transform (assoc ::pco/transform transform)))]
       [alias-resolver entity-by-attribute-resolver])))
 
 

@@ -27,4 +27,3 @@
   ([]
    (fn [{::form/keys [params] :as pathom-env}]
      (sql.resolvers/delete-entity! pathom-env params))))
-
