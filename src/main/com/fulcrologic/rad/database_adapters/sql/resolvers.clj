@@ -113,14 +113,23 @@
                        v))
     :else v))
 
+(defn tempid-in-value? [v]
+  (cond
+    (tempid/tempid? v) true
+    (eql/ident? v) (let [[k id] v]
+                     (if (tempid/tempid? id)
+                       true
+                       false))
+    :else false))
+
 (def keys-in-delta
   (fn keys-in-delta [delta]
     (let [id-keys  (into #{}
-                     (map first)
-                     (keys delta))
+                         (map first)
+                         (keys delta))
           all-keys (into id-keys
-                     (mapcat keys)
-                     (vals delta))]
+                         (mapcat keys)
+                         (vals delta))]
       all-keys)))
 
 (defn schemas-for-delta [{::attr/keys [key->attribute]} delta]
@@ -160,12 +169,12 @@
     :else form-value))
 
 (defn scalar-insert
-  [{::attr/keys [key->attribute] :as env} schema-to-save tempids [table id :as ident] diff]
+  [ds {::attr/keys [key->attribute]
+       ::rad.sql/keys [connection-pools] :as env} schema-to-save tempids [table id :as ident] diff]
   (when (tempid/tempid? (log/spy :trace id))
     (let [{::attr/keys [type schema] :as id-attr} (key->attribute table)]
       (if (= schema schema-to-save)
         (let [table-name    (sql.schema/table-name key->attribute id-attr)
-              real-id       (get tempids id id)
               scalar-attrs  (keep
                               (fn [k] (table-local-attr key->attribute schema-to-save k))
                               (keys diff))
@@ -178,22 +187,26 @@
                                (let [v (new-val attr)]
                                  (if (nil? v)
                                    acc
-                                   (assoc acc (sql.schema/column-name attr) v))))
-                             {(sql.schema/column-name id-attr) real-id}
+                                   (assoc acc (keyword (sql.schema/column-name attr)) v))))
+                             {}
                              scalar-attrs)
               query (sql/format {:insert-into table-name
-                                 :values [values]})]
-          query)
+                                 :values [values]})
+              result (jdbc/execute-one! ds query {:return-keys true})]
+          (long (:insert_id result)))
         (log/debug "Schemas do not match. Not updating" ident)))))
 
 (defn delta->scalar-inserts [{::attr/keys    [key->attribute]
                               ::rad.sql/keys [connection-pools]
                               :as            env} schema delta]
-  (let [ds      (get connection-pools schema)
-        tempids (log/spy :trace (generate-tempids ds key->attribute delta))
-        stmts   (keep (fn [[ident diff]] (scalar-insert env schema tempids ident diff)) delta)]
-    {:tempids        tempids
-     :insert-scalars stmts}))
+  (let [ds      (get connection-pools schema)]
+    (reduce (fn [{:keys [tempids] :as acc} [[_ id :as ident] diff]]
+              (if-let [insert-id (scalar-insert ds env schema tempids ident diff)]
+                (assoc-in acc [:tempids id] insert-id)
+                (assoc-in acc [:delta ident] diff)))
+            {:delta {}
+             :tempids {}}
+            delta)))
 
 (defn scalar-update
   [{::keys      [tempids]
@@ -237,11 +250,10 @@
           (if (= values :delete)
             (sql/format {:delete-from table-name
                          :where [:= (keyword (sql.schema/column-name id-attr)) id]})
-            (when (not (empty? values))
+            (when (seq values)
               (sql/format {:update table-name
                            :set values
                            :where [:= (keyword (sql.schema/column-name id-attr)) id]}))))))))
-
 
 (defn delta->scalar-updates [env schema delta]
   (let [stmts (vec (keep (fn [[ident diff]] (scalar-update env schema ident diff)) delta))]
@@ -348,20 +360,21 @@
     ;; TASK: Transaction should be opened on all databases at once, so that they all succeed or fail
     (doseq [schema (keys connection-pools)]
       (let [adapter        (get adapters schema default-adapter)
-            ds             (get connection-pools schema)
-            {:keys [tempids insert-scalars]} (log/spy :trace (delta->scalar-inserts env schema delta)) ; any non-fk column with a tempid
-            delta (delta->ref-updates env tempids schema delta)
-            update-scalars (log/spy :trace (delta->scalar-updates (assoc env ::tempids tempids) schema delta)) ; any non-fk columns on entries with pre-existing id
-                                        ; all fk columns on entire delta
-            steps          (concat insert-scalars update-scalars)]
+            ds             (get connection-pools schema)]
         (jdbc/with-transaction [ds ds {:isolation :serializable}]
-          ;; allow relaxed FK constraints until end of txn
-          (when adapter
-            (vendor/relax-constraints! adapter ds))
-          (doseq [stmt-with-params steps]
-            (log/debug stmt-with-params)
-            (jdbc/execute! ds stmt-with-params)))
-        (swap! result update :tempids merge tempids)))
+          ;; doing the scalar inserts
+          ;; in the original library, the statements are pre-calculated.
+          ;; I could not find to know in advance the IDs of the entities being inserted
+          ;; to resolve the tempids in the other queries.
+          (let [{:keys [tempids delta]} (log/spy :trace (delta->scalar-inserts env schema delta))
+                delta (delta->ref-updates env tempids schema delta)
+                update-scalars (log/spy :trace (delta->scalar-updates (assoc env ::tempids tempids) schema delta))]
+            ;; allow relaxed FK constraints until end of txn
+            (when adapter
+              (vendor/relax-constraints! adapter ds))
+            (doseq [stmt-with-params update-scalars]
+              (jdbc/execute! ds stmt-with-params))
+            (swap! result update :tempids merge tempids)))))
     @result))
 
 (defn delete-entity! [env params]
