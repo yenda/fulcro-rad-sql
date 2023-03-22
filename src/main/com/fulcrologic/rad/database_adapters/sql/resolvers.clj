@@ -366,13 +366,14 @@
           ;; in the original library, the statements are pre-calculated.
           ;; I could not find to know in advance the IDs of the entities being inserted
           ;; to resolve the tempids in the other queries.
-          (let [{:keys [tempids delta]} (log/spy :trace (delta->scalar-inserts env schema delta))
-                delta (delta->ref-updates env tempids schema delta)
+          (let [delta (delta->ref-updates env {} schema delta)
+                {:keys [tempids delta]} (log/spy :trace (delta->scalar-inserts env schema delta))
                 update-scalars (log/spy :trace (delta->scalar-updates (assoc env ::tempids tempids) schema delta))]
             ;; allow relaxed FK constraints until end of txn
             (when adapter
               (vendor/relax-constraints! adapter ds))
             (doseq [stmt-with-params update-scalars]
+              (log/debug :stmt stmt-with-params)
               (jdbc/execute! ds stmt-with-params))
             (swap! result update :tempids merge tempids)))))
     @result))
