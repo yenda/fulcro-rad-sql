@@ -23,7 +23,9 @@
   [id-attribute-key id-attribute->attributes k->attr]
   (let [id-attribute (k->attr id-attribute-key)
         outputs (reduce (fn [acc attr]
-                          (if (= :many (::attr/cardinality attr))
+                          (if (or (= :many (::attr/cardinality attr))
+                                  (and (= :one (::attr/cardinality attr))
+                                       (= false (::rad.sql/owns-ref? attr))))
                             acc
                             (conj acc attr)))
                         [id-attribute]
@@ -209,7 +211,8 @@
   (let [{:keys [one-to-one one-to-many]}
         (->> attributes
              (filter #(= schema (::attr/schema %)))
-             (filter #(= :one (::attr/cardinality %)))
+             (filter #(and (= :one (::attr/cardinality %))
+                           (not (false? (::rad.sql/owns-ref? %)))))
              (mapcat
               (fn [attribute]
                 (for [entity-id (::attr/identities attribute)]
