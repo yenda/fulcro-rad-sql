@@ -56,7 +56,7 @@
                                                                                                     output-attributes)
                                                                                       :from (get-table id-attribute)
                                                                                       :where [:in (get-column id-attribute) ids]})
-                                                                   #_ (log/info :SQL query)
+                                                                   _ (log/debug :id-resolver-query query)
                                                                    rows (sql.query/eql-query! env
                                                                                               query
                                                                                               schema
@@ -115,7 +115,7 @@
                                                                                         output-attributes)
                                                                           :from (get-table id-attribute)
                                                                           :where [:in (get-column relationship-attribute) ids]})
-                                                       #_ (log/info :SQL query)
+                                                       _ (log/debug :one-to-one-resolver-query query)
                                                        rows (sql.query/eql-query! env
                                                                                   query
                                                                                   schema
@@ -182,10 +182,7 @@
                                     :from (get-table id-attribute)
                                     :where [:in relationship-column ids]
                                     :group-by [relationship-column]})
-                            _ (log/info :SQL query {:select [relationship-column [[:json_arrayagg (get-column id-attribute)] :k]]
-                                                    :from (get-table id-attribute)
-                                                    :where [:in relationship-column ids]
-                                                    :group-by [relationship-column]})
+                            _ (log/debug :one-to-many-resolver-query query)
                             rows (sql.query/eql-query! env
                                                        query
                                                        schema
