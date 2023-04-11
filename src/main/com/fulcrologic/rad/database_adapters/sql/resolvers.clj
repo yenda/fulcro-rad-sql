@@ -135,8 +135,8 @@
 (defn schemas-for-delta [{::attr/keys [key->attribute]} delta]
   (let [all-keys (keys-in-delta delta)
         schemas  (into #{}
-                   (keep #(-> % key->attribute ::attr/schema))
-                   all-keys)]
+                       (keep #(-> % key->attribute ::attr/schema))
+                       all-keys)]
     schemas))
 
 (defn- generate-tempids [ds key->attribute delta]
@@ -172,9 +172,10 @@
   [ds {::attr/keys [key->attribute]
        ::rad.sql/keys [connection-pools] :as env} schema-to-save tempids [table id :as ident] diff]
   (when (tempid/tempid? (log/spy :trace id))
-    (let [{::attr/keys [type schema] :as id-attr} (key->attribute table)]
+    (let [{::attr/keys [type schema qualified-key] :as id-attr} (key->attribute table)]
       (if (= schema schema-to-save)
-        (let [table-name    (sql.schema/table-name key->attribute id-attr)
+        (let [resolved-id (get tempids id)
+              table-name    (sql.schema/table-name key->attribute id-attr)
               scalar-attrs  (keep
                               (fn [k] (table-local-attr key->attribute schema-to-save k))
                               (keys diff))
@@ -188,12 +189,16 @@
                                  (if (nil? v)
                                    acc
                                    (assoc acc (keyword (sql.schema/column-name attr)) v))))
-                             {}
+                             ;; NOTE: when a table uses a foreign key as id
+                             (if resolved-id
+                               {(keyword (sql.schema/column-name id-attr)) resolved-id}
+                               {})
                              scalar-attrs)
               query (sql/format {:insert-into table-name
                                  :values [values]})
-              result (jdbc/execute-one! ds query {:return-keys true})]
-          (long (:insert_id result)))
+              _ (log/debug :scalar-insert query)
+              result  (jdbc/execute-one! ds query {:return-keys true})]
+          (when-not resolved-id (long (:insert_id result))))
         (log/debug "Schemas do not match. Not updating" ident)))))
 
 (defn delta->scalar-inserts [{::attr/keys    [key->attribute]
@@ -364,9 +369,10 @@
         (jdbc/with-transaction [ds ds {:isolation :serializable}]
           ;; doing the scalar inserts
           ;; in the original library, the statements are pre-calculated.
-          ;; I could not find to know in advance the IDs of the entities being inserted
-          ;; to resolve the tempids in the other queries.
+          ;; I could not find how to know in advance the IDs of the entities being inserted
+          ;; to resolve the tempids in the other queries with mysql.
           (let [delta (delta->ref-updates env {} schema delta)
+                _ (log/info :transformed-delta (with-out-str (pprint delta)))
                 {:keys [tempids delta]} (log/spy :trace (delta->scalar-inserts env schema delta))
                 update-scalars (log/spy :trace (delta->scalar-updates (assoc env ::tempids tempids) schema delta))]
             ;; allow relaxed FK constraints until end of txn
