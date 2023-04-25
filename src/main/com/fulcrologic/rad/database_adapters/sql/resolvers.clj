@@ -194,24 +194,61 @@
                                {(keyword (sql.schema/column-name id-attr)) resolved-id}
                                {})
                              scalar-attrs)
-              query (sql/format {:insert-into table-name
-                                 :values [values]})
-              _ (log/debug :scalar-insert query)
-              result  (jdbc/execute-one! ds query {:return-keys true})]
-          (when-not resolved-id (long (:insert_id result))))
+              missing-values? (or
+                               ;; an entity may have just one value which is a foreign key
+                               (empty? values)
+                               ;; or one of the value is an unresolved (yet) foreign key
+                               (some tempid/tempid? (vals values)))]
+          ;; either way we can't insert the value nothing or a tempid instead of an id
+          (if missing-values?
+            ;; so we wait
+            [:waiting-foreign-id]
+            (let [query (sql/format {:insert-into table-name
+                                     :values [values]})
+                  _ (log/debug :scalar-insert query)
+                  #_(jdbc/execute! ds ["SET FOREIGN_KEY_CHECKS = 0;"])
+                  result  (jdbc/execute-one! ds query {:return-keys true})]
+              ;; NOTE: we only return the insert-id if the tempid was not resolved,
+              ;; if it is resolved already it means the tempid was refering to a
+              ;; foreign key
+              (if resolved-id
+                [:inserted-foreign-id resolved-id]
+                [:inserted-new-id (long (:insert_id result))]))))
         (log/debug "Schemas do not match. Not updating" ident)))))
 
 (defn delta->scalar-inserts [{::attr/keys    [key->attribute]
                               ::rad.sql/keys [connection-pools]
-                              :as            env} schema delta]
-  (let [ds      (get connection-pools schema)]
-    (reduce (fn [{:keys [tempids] :as acc} [[_ id :as ident] diff]]
-              (if-let [insert-id (scalar-insert ds env schema tempids ident diff)]
-                (assoc-in acc [:tempids id] insert-id)
-                (assoc-in acc [:delta ident] diff)))
-            {:delta {}
-             :tempids {}}
-            delta)))
+                              :as            env} ds schema delta]
+  ;; we are going to insert scalars from the delta until there isn't any
+  ;; waiting for a tempid to be resolved
+  (loop [new-delta delta
+         tempids {}
+         depth 0]
+    (let [{:keys [new-delta tempids waiting?]}
+          (reduce (fn [{:keys [tempids] :as acc} [[_ id :as ident] diff]]
+                    (let [[result some-id] (scalar-insert ds env schema tempids ident diff)]
+                      (case result
+                        :inserted-foreign-id acc
+                        :inserted-new-id (assoc-in acc [:tempids id] some-id)
+                        :waiting-foreign-id (-> acc
+                                                (assoc :waiting? true)
+                                                (assoc-in [:new-delta ident] diff))
+                        (assoc-in acc [:new-delta ident] diff))))
+                  {:new-delta {}
+                   :tempids tempids}
+                  new-delta)]
+      (if waiting?
+        ;; unless we have been looping 10 times already.
+        ;; 10 is arbitrary but seems like a safe number for now
+        ;; it would need to be increased if we had cases of 10 levels deep forms
+        (if (< 10 depth)
+          (throw (ex-info "Infinite loop detected when inserting scalars. Something went wrong"
+                          {:delta delta
+                           :new-delta new-delta
+                           :tempids tempids}))
+          (recur new-delta tempids (inc depth)))
+        {:delta new-delta
+         :tempids tempids}))))
 
 (defn scalar-update
   [{::keys      [tempids]
@@ -236,7 +273,7 @@
                                    v))))
               values (reduce
                       (fn [result attr]
-                        (let [new      (log/spy :trace (new-val attr))
+                        (let [new      (log/spy :debug (new-val attr))
                               col-name (keyword (sql.schema/column-name attr))
                               old      (old-val attr)]
                           (cond
@@ -366,18 +403,18 @@
     (doseq [schema (keys connection-pools)]
       (let [adapter        (get adapters schema default-adapter)
             ds             (get connection-pools schema)]
-        (jdbc/with-transaction [ds ds {:isolation :serializable}]
+        (jdbc/with-transaction [ds ds]
+          (when adapter
+            (vendor/relax-constraints! adapter ds))
           ;; doing the scalar inserts
           ;; in the original library, the statements are pre-calculated.
           ;; I could not find how to know in advance the IDs of the entities being inserted
           ;; to resolve the tempids in the other queries with mysql.
           (let [delta (delta->ref-updates env {} schema delta)
                 _ (log/info :transformed-delta (with-out-str (pprint delta)))
-                {:keys [tempids delta]} (log/spy :trace (delta->scalar-inserts env schema delta))
+                {:keys [tempids delta]} (log/spy :trace (delta->scalar-inserts env ds schema delta))
                 update-scalars (log/spy :trace (delta->scalar-updates (assoc env ::tempids tempids) schema delta))]
             ;; allow relaxed FK constraints until end of txn
-            (when adapter
-              (vendor/relax-constraints! adapter ds))
             (doseq [stmt-with-params update-scalars]
               (log/debug :stmt stmt-with-params)
               (jdbc/execute! ds stmt-with-params))
