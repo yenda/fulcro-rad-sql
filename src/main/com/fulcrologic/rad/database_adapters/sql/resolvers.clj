@@ -421,5 +421,22 @@
             (swap! result update :tempids merge tempids)))))
     @result))
 
-(defn delete-entity! [env params]
-  (log/error "DELETE NOT IMPLEMENTED" params))
+(defn delete-entity!
+  "TODO: does not cascade delete yet"
+  [{::rad.sql/keys [connection-pools adapters default-adapter]
+    ::attr/keys [key->attribute] :as env} params]
+  (let [[[id-key id]] (into [] params)
+        id-attr (key->attribute id-key)]
+    (doseq [schema (keys connection-pools)]
+      (let [adapter        (get adapters schema default-adapter)
+            ds             (get connection-pools schema)]
+        (when (= schema (::attr/schema id-attr))
+          (let [table-name     (sql.schema/table-name key->attribute id-attr)
+                id-column-name (sql.schema/column-name id-attr)
+                stmt (sql/format {:delete-from table-name
+                                  :where [:= (keyword id-column-name) id]})]
+            (log/info :delete-stmt stmt)
+            (jdbc/with-transaction [ds ds]
+              (when adapter
+                (vendor/relax-constraints! adapter ds))
+              (log/info :result-delete (jdbc/execute! ds stmt)))))))))
