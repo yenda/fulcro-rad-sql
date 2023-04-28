@@ -391,6 +391,24 @@
    delta
    delta))
 
+(defn delta->deletes [{::attr/keys    [key->attribute]
+                       ::rad.sql/keys [connection-pools adapters default-adapter many-to-one-relationships]
+                       :as            env} schema delta]
+  (reduce
+   (fn [acc [[id-key id :as ident] diff]]
+     (let [id-attr (key->attribute id-key)]
+       (when (= schema (::attr/schema id-attr))
+         (if (:delete diff)
+           (let [table-name     (sql.schema/table-name key->attribute id-attr)
+                 id-column-name (sql.schema/column-name id-attr)
+                 stmt (sql/format {:delete-from table-name
+                                   :where [:= (keyword id-column-name) id]})]
+             (update acc :deletes conj stmt))
+           (assoc-in acc [:delta ident] diff)))))
+   {:deletes []
+    :delta {}}
+   delta))
+
 (defn save-form!
   [{::attr/keys    [key->attribute]
     ::rad.sql/keys [connection-pools adapters default-adapter many-to-one-relationships]
@@ -412,31 +430,12 @@
           ;; to resolve the tempids in the other queries with mysql.
           (let [delta (delta->ref-updates env {} schema delta)
                 _ (log/info :transformed-delta (with-out-str (pprint delta)))
+                {:keys [delta deletes]} (delta->deletes env schema delta)
                 {:keys [tempids delta]} (log/spy :trace (delta->scalar-inserts env ds schema delta))
                 update-scalars (log/spy :trace (delta->scalar-updates (assoc env ::tempids tempids) schema delta))]
             ;; allow relaxed FK constraints until end of txn
-            (doseq [stmt-with-params update-scalars]
+            (doseq [stmt-with-params (concat deletes update-scalars)]
               (log/debug :stmt stmt-with-params)
               (jdbc/execute! ds stmt-with-params))
             (swap! result update :tempids merge tempids)))))
     @result))
-
-(defn delete-entity!
-  "TODO: does not cascade delete yet"
-  [{::rad.sql/keys [connection-pools adapters default-adapter]
-    ::attr/keys [key->attribute] :as env} params]
-  (let [[[id-key id]] (into [] params)
-        id-attr (key->attribute id-key)]
-    (doseq [schema (keys connection-pools)]
-      (let [adapter        (get adapters schema default-adapter)
-            ds             (get connection-pools schema)]
-        (when (= schema (::attr/schema id-attr))
-          (let [table-name     (sql.schema/table-name key->attribute id-attr)
-                id-column-name (sql.schema/column-name id-attr)
-                stmt (sql/format {:delete-from table-name
-                                  :where [:= (keyword id-column-name) id]})]
-            (log/info :delete-stmt stmt)
-            (jdbc/with-transaction [ds ds]
-              (when adapter
-                (vendor/relax-constraints! adapter ds))
-              (log/info :result-delete (jdbc/execute! ds stmt)))))))))
