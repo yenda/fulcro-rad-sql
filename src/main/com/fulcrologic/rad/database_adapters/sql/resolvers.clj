@@ -226,14 +226,21 @@
          depth 0]
     (let [{:keys [new-delta tempids waiting?]}
           (reduce (fn [{:keys [tempids] :as acc} [[_ id :as ident] diff]]
-                    (let [[result some-id] (scalar-insert ds env schema tempids ident diff)]
-                      (case result
-                        :inserted-foreign-id acc
-                        :inserted-new-id (assoc-in acc [:tempids id] some-id)
-                        :waiting-foreign-id (-> acc
-                                                (assoc :waiting? true)
-                                                (assoc-in [:new-delta ident] diff))
-                        (assoc-in acc [:new-delta ident] diff))))
+                    (if-not (tempid/tempid? (log/spy :trace id))
+                      (assoc-in acc [:new-delta ident] diff)
+                      (let [[result some-id] (scalar-insert ds env schema tempids ident diff)]
+                        (when result
+                          (log/debug :ident ident
+                                     :diff diff
+                                     :result result
+                                     :some-id some-id))
+                        (case result
+                          :inserted-foreign-id acc
+                          :inserted-new-id (assoc-in acc [:tempids id] some-id)
+                          :waiting-foreign-id (-> acc
+                                                  (assoc :waiting? true)
+                                                  (assoc-in [:new-delta ident] diff))
+                          (assoc-in acc [:new-delta ident] diff)))))
                   {:new-delta {}
                    :tempids tempids}
                   new-delta)]
@@ -397,14 +404,15 @@
   (reduce
    (fn [acc [[id-key id :as ident] diff]]
      (let [id-attr (key->attribute id-key)]
-       (when (= schema (::attr/schema id-attr))
+       (if (= schema (::attr/schema id-attr))
          (if (:delete diff)
            (let [table-name     (sql.schema/table-name key->attribute id-attr)
                  id-column-name (sql.schema/column-name id-attr)
                  stmt (sql/format {:delete-from table-name
                                    :where [:= (keyword id-column-name) id]})]
              (update acc :deletes conj stmt))
-           (assoc-in acc [:delta ident] diff)))))
+           (assoc-in acc [:delta ident] diff))
+         acc)))
    {:deletes []
     :delta {}}
    delta))
