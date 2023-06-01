@@ -204,16 +204,17 @@
             ;; so we wait
             [:waiting-foreign-id]
             (let [query (sql/format {:insert-into table-name
-                                     :values [values]})
+                                     :values [values]
+                                     :returning [:*]})
                   _ (log/debug :scalar-insert query)
                   #_(jdbc/execute! ds ["SET FOREIGN_KEY_CHECKS = 0;"])
-                  result  (jdbc/execute-one! ds query {:return-keys true})]
+                  result  (jdbc/execute-one! ds query {:builder-fn sql.query/row-builder})]
               ;; NOTE: we only return the insert-id if the tempid was not resolved,
               ;; if it is resolved already it means the tempid was refering to a
               ;; foreign key
               (if resolved-id
                 [:inserted-foreign-id resolved-id]
-                [:inserted-new-id (long (:insert_id result))]))))
+                [:inserted-new-id (get result (keyword (sql.schema/column-name id-attr)))]))))
         (log/debug "Schemas do not match. Not updating" ident)))))
 
 (defn delta->scalar-inserts [{::attr/keys    [key->attribute]

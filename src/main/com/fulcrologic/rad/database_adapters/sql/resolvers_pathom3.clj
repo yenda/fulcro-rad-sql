@@ -176,9 +176,9 @@
                       (let [ids (mapv target input)
                             relationship-column (get-column relationship-attribute)
                             query (sql/format
-                                   {:select [relationship-column [[:json_arrayagg (if order-by
-                                                                                    [:order-by (get-column id-attribute) order-by]
-                                                                                    (get-column id-attribute))] :k]]
+                                   {:select [relationship-column [[:array_agg (if order-by
+                                                                                [:order-by (get-column id-attribute) order-by]
+                                                                                (get-column id-attribute))] :k]]
                                     :from (get-table id-attribute)
                                     :where [:in relationship-column ids]
                                     :group-by [relationship-column]})
