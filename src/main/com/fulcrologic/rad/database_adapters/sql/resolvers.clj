@@ -24,7 +24,8 @@
     [clojure.string :as str]
     [clojure.set :as set]
     [edn-query-language.core :as eql]
-    [com.fulcrologic.rad.database-adapters.sql.vendor :as vendor]))
+    [com.fulcrologic.rad.database-adapters.sql.vendor :as vendor]
+    [com.fulcrologic.rad.attributes :as rad.attr]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Reads
@@ -113,30 +114,21 @@
                        v))
     :else v))
 
-(defn tempid-in-value? [v]
-  (cond
-    (tempid/tempid? v) true
-    (eql/ident? v) (let [[k id] v]
-                     (if (tempid/tempid? id)
-                       true
-                       false))
-    :else false))
-
 (def keys-in-delta
   (fn keys-in-delta [delta]
     (let [id-keys  (into #{}
-                         (map first)
-                         (keys delta))
+                     (map first)
+                     (keys delta))
           all-keys (into id-keys
-                         (mapcat keys)
-                         (vals delta))]
+                     (mapcat keys)
+                     (vals delta))]
       all-keys)))
 
 (defn schemas-for-delta [{::attr/keys [key->attribute]} delta]
   (let [all-keys (keys-in-delta delta)
         schemas  (into #{}
-                       (keep #(-> % key->attribute ::attr/schema))
-                       all-keys)]
+                   (keep #(-> % key->attribute ::attr/schema))
+                   all-keys)]
     schemas))
 
 (defn- generate-tempids [ds key->attribute delta]
@@ -145,7 +137,7 @@
      (if (tempid/tempid? id)
        (let [{::attr/keys [type] :as id-attr} (key->attribute table)
              real-id (if (#{:int :long} type)
-                       (:id (first (jdbc/execute! ds [(format "SELECT max(id) from" (sql.schema/sequence-name id-attr))])))
+                       (:id (first (jdbc/execute! ds [(format "SELECT NEXTVAL('%s') AS id" (sql.schema/sequence-name id-attr))])))
                        (ids/new-uuid))]
          (assoc result id real-id))
        result))
@@ -157,7 +149,16 @@
   [k->a schema-to-save k]
   (let [{::attr/keys [type cardinality schema] :as attr} (k->a k)]
     (when (= schema schema-to-save)
-      (when-not (and (= cardinality :many) (= :ref type))
+      (cond
+        (and (= cardinality :many) (= :ref type))
+        nil
+
+        (= cardinality :one)
+        (if (::rad.sql/ref attr)
+          nil
+          attr)
+
+        :else
         attr))))
 
 (defn form->sql-value [{::attr/keys    [type cardinality]
@@ -169,15 +170,15 @@
     :else form-value))
 
 (defn scalar-insert
-  [ds {::attr/keys [key->attribute]
-       ::rad.sql/keys [connection-pools] :as env} schema-to-save tempids [table id :as ident] diff]
+  [{::attr/keys [key->attribute] :as env} schema-to-save tempids [table id :as ident] diff]
   (when (tempid/tempid? (log/spy :trace id))
-    (let [{::attr/keys [type schema qualified-key] :as id-attr} (key->attribute table)]
+    (let [{::attr/keys [type schema] :as id-attr} (key->attribute table)]
       (if (= schema schema-to-save)
-        (let [resolved-id (get tempids id)
-              table-name    (sql.schema/table-name key->attribute id-attr)
+        (let [table-name    (sql.schema/table-name key->attribute id-attr)
+              real-id       (get tempids id id)
               scalar-attrs  (keep
-                              (fn [k] (table-local-attr key->attribute schema-to-save k))
+                              (fn [k]
+                                (table-local-attr key->attribute schema-to-save k))
                               (keys diff))
               new-val       (fn [{::attr/keys [qualified-key schema] :as attr}]
                               (when (= schema schema-to-save)
@@ -188,79 +189,26 @@
                                (let [v (new-val attr)]
                                  (if (nil? v)
                                    acc
-                                   (assoc acc (keyword (sql.schema/column-name attr)) v))))
-                             ;; NOTE: when a table uses a foreign key as id
-                             (if resolved-id
-                               {(keyword (sql.schema/column-name id-attr)) resolved-id}
-                               {})
-                             scalar-attrs)
-              missing-values? (or
-                               ;; an entity may have just one value which is a foreign key
-                               (empty? values)
-                               ;; or one of the value is an unresolved (yet) foreign key
-                               (some tempid/tempid? (vals values)))]
-          ;; either way we can't insert the value nothing or a tempid instead of an id
-          (if missing-values?
-            ;; so we wait
-            [:waiting-foreign-id]
-            (let [query (sql/format {:insert-into table-name
-                                     :values [values]
-                                     :returning [:*]})
-                  _ (log/debug :scalar-insert query)
-                  #_(jdbc/execute! ds ["SET FOREIGN_KEY_CHECKS = 0;"])
-                  result  (jdbc/execute-one! ds query {:builder-fn sql.query/row-builder})]
-              ;; NOTE: we only return the insert-id if the tempid was not resolved,
-              ;; if it is resolved already it means the tempid was refering to a
-              ;; foreign key
-              (if resolved-id
-                [:inserted-foreign-id resolved-id]
-                [:inserted-new-id (get result (keyword (sql.schema/column-name id-attr)))]))))
-        (log/debug "Schemas do not match. Not updating" ident)))))
+                                   (assoc acc (sql.schema/column-name attr) v))))
+                             {(sql.schema/column-name id-attr) real-id}
+                             scalar-attrs)]
+          (sql/format {:insert-into table-name
+                       :values [values]
+                       :returning [:*]}))
+        (log/debug "Schemas do not match. Not updating" ident)        ))))
 
 (defn delta->scalar-inserts [{::attr/keys    [key->attribute]
                               ::rad.sql/keys [connection-pools]
-                              :as            env} ds schema delta]
-  ;; we are going to insert scalars from the delta until there isn't any
-  ;; waiting for a tempid to be resolved
-  (loop [new-delta delta
-         tempids {}
-         depth 0]
-    (let [{:keys [new-delta tempids waiting?]}
-          (reduce (fn [{:keys [tempids] :as acc} [[_ id :as ident] diff]]
-                    (if-not (tempid/tempid? (log/spy :trace id))
-                      (assoc-in acc [:new-delta ident] diff)
-                      (let [[result some-id] (scalar-insert ds env schema tempids ident diff)]
-                        (when result
-                          (log/debug :ident ident
-                                     :diff diff
-                                     :result result
-                                     :some-id some-id))
-                        (case result
-                          :inserted-foreign-id acc
-                          :inserted-new-id (assoc-in acc [:tempids id] some-id)
-                          :waiting-foreign-id (-> acc
-                                                  (assoc :waiting? true)
-                                                  (assoc-in [:new-delta ident] diff))
-                          (assoc-in acc [:new-delta ident] diff)))))
-                  {:new-delta {}
-                   :tempids tempids}
-                  new-delta)]
-      (if waiting?
-        ;; unless we have been looping 10 times already.
-        ;; 10 is arbitrary but seems like a safe number for now
-        ;; it would need to be increased if we had cases of 10 levels deep forms
-        (if (< 10 depth)
-          (throw (ex-info "Infinite loop detected when inserting scalars. Something went wrong"
-                          {:delta delta
-                           :new-delta new-delta
-                           :tempids tempids}))
-          (recur new-delta tempids (inc depth)))
-        {:delta new-delta
-         :tempids tempids}))))
+                              :as            env} schema delta]
+  (let [ds      (get connection-pools schema)
+        tempids (log/spy :trace (generate-tempids ds key->attribute delta))
+        stmts   (keep (fn [[ident diff]] (scalar-insert env schema tempids ident diff)) delta)]
+    {:tempids        tempids
+     :insert-scalars stmts}))
 
 (defn scalar-update
   [{::keys      [tempids]
-    ::attr/keys [key->attribute] :as env} schema-to-save [table id :as ident] diff]
+    ::attr/keys [key->attribute] :as env} tempids schema-to-save [table id :as ident] diff]
   (when-not (tempid/tempid? id)
     (let [{::attr/keys [type schema] :as id-attr} (key->attribute table)]
       (when (= schema-to-save schema)
@@ -271,14 +219,11 @@
               old-val      (fn [{::attr/keys [qualified-key] :as attr}]
                              (some->> (get-in diff [qualified-key :before])
                                       (form->sql-value attr)))
-              new-val      (fn [{::attr/keys [qualified-key schema required?] :as attr}]
+              new-val      (fn [{::attr/keys [qualified-key schema] :as attr}]
                              (when (= schema schema-to-save)
                                (let [v (get-in diff [qualified-key :after])
-                                     v (resolve-tempid-in-value tempids v)
-                                     v (form->sql-value attr v)]
-                                 (if (and (nil? v) required?)
-                                   :delete
-                                   v))))
+                                     v (resolve-tempid-in-value tempids v)]
+                                 (form->sql-value attr v))))
               values (reduce
                       (fn [result attr]
                         (let [new      (log/spy :debug (new-val attr))
@@ -297,154 +242,85 @@
                             result)))
                       {}
                       scalar-attrs)]
-          (if (= values :delete)
+          (if (= :delete values)
             (sql/format {:delete-from table-name
-                         :where [:= (keyword (sql.schema/column-name id-attr)) id]})
+                         :where [:= (sql.schema/column-name id-attr) id]})
             (when (seq values)
               (sql/format {:update table-name
                            :set values
-                           :where [:= (keyword (sql.schema/column-name id-attr)) id]}))))))))
+                           :where [:= (sql.schema/column-name id-attr) id]}))))))))
 
-(defn delta->scalar-updates [env schema delta]
-  (let [stmts (vec (keep (fn [[ident diff]] (scalar-update env schema ident diff)) delta))]
-    stmts))
+(defn delta->scalar-updates [env tempids schema delta]
+  (vec (keep (fn [[ident diff]] (scalar-update env tempids schema ident diff)) delta)))
 
-(defn- ref-one-attr
-  [k->a k]
-  (let [{::attr/keys [type cardinality] :as attr} (k->a k)]
-    (when (and (= :ref type) (not= cardinality :many))
-      attr)))
+(defn process-attributes [key->attribute delta]
+  (reduce (fn [acc [ident attributes]]
+            (reduce (fn [acc [attr-k value]]
+                      (let [{::rad.attr/keys [type cardinality]
+                             ::rad.sql/keys [ref delete-referent?] :as attribute                             }
+                            (key->attribute attr-k)
+                            {:keys [before after]} value]
+                        (if (and ref
+                                 (not (= before after nil)))
+                          (case cardinality
+                            :one
+                            (assoc-in acc [(:after value) ref] {:after ident})
+                            :many
+                            (let [after-set (into #{} after)
+                                  before-set (into #{} before)]
+                              (reduce (fn [acc ref-ident]
+                                        (cond
+                                          (and (after-set ref-ident)
+                                               (not (before-set ref-ident)))
+                                          (assoc-in acc [ref-ident ref] {:after ident})
 
-(defn- ref-many-attr
-  [k->a k]
-  (let [{::attr/keys [type cardinality] :as attr} (k->a k)]
-    (when (and (= :ref type) (= cardinality :many))
-      attr)))
+                                          (and (before-set ref-ident)
+                                               (not (after-set ref-ident)))
+                                          (assoc-in acc [ref-ident ref] {:before ident
+                                                                         :after (if delete-referent?
+                                                                                  :delete
+                                                                                  nil)})
 
-(defn to-one-ref-update [{::attr/keys [key->attribute] :as env} schema-to-save id-attr tempids row-id attr old-val [_ new-id :as new-val]]
-  (when (= schema-to-save (::attr/schema attr))
-    (let [table-name     (sql.schema/table-name key->attribute id-attr)
-          {delete-on-remove? ::rad.sql/delete-referent?} attr
-          id-column-name (sql.schema/column-name id-attr)
-          target-id      (get tempids row-id row-id)
-          new-id         (get tempids new-id new-id)]
-      (cond
-        new-id
-        (sql/format {:update table-name
-                     :set {(keyword (sql.schema/column-name attr)) new-id}
-                     :where [:= (keyword (sql.schema/column-name id-column-name)) target-id]})
-
-        old-val
-        (if delete-on-remove?
-          (let [foreign-table-id-key  (first old-val)
-                old-id                (second old-val)
-                foreign-table-id-attr (key->attribute foreign-table-id-key)
-                foreign-table-name    (sql.schema/table-name key->attribute foreign-table-id-attr)
-                foreign-id-column     (keyword (sql.schema/column-name key->attribute foreign-table-id-attr))]
-            (sql/format {:delete-from foreign-table-name
-                         :where [:= foreign-id-column old-id]}))
-          (sql/format {:update table-name
-                       :set {(keyword (sql.schema/column-name attr)) nil}
-                       :where [:= (keyword (sql.schema/column-name id-column-name)) target-id]}))))))
-
-(defn to-many-ref-update [schema tempids target-id to-many-attr old-val new-val]
-  (when  (= schema (::attr/schema to-many-attr))
-    (let [{delete-on-remove? ::rad.sql/delete-referent?} to-many-attr
-          target-id       (get tempids target-id target-id)
-          old-val (into #{} old-val)
-          new-val (into #{} new-val)
-          adds            (set/difference new-val old-val)
-          removes         (set/difference old-val new-val)
-          add-stmts (reduce (fn [acc id]
-                              (assoc acc id {(::attr/qualified-key to-many-attr) {:after target-id}}))
-                            {}
-                            adds)]
-      (reduce (fn [acc id]
-                (assoc acc id {(::attr/qualified-key to-many-attr)
-                               {:before target-id :after nil}}))
-              add-stmts
-              removes))))
-
-(defn ref-updates [{::rad.sql/keys [one-to-many-relationships]
-                    ::attr/keys [key->attribute] :as env} schema tempids [table id :as ident] diff]
-  (let [id-attr           (key->attribute table)
-        to-one-ref-attrs  (keep (fn [k] (ref-one-attr key->attribute k)) (keys diff))
-        to-many-ref-attrs (keep (fn [k] (one-to-many-relationships k)) (keys diff))
-        old-val           (fn [{{::attr/keys [qualified-key]} :target-attribute}] (get-in diff [qualified-key :before]))
-        new-val           (fn [{{::attr/keys [qualified-key]} :target-attribute}] (get-in diff [qualified-key :after]))]
-
-    (concat
-     (keep (fn [a] (to-one-ref-update env schema id-attr tempids id a (old-val a) (new-val a))) to-one-ref-attrs)
-     (mapcat (fn [a] (to-many-ref-update schema tempids id a (old-val a) (new-val a))) to-many-ref-attrs))))
-
-(defn delta->ref-updates [env tempids schema delta]
-  (reduce
-   (fn [acc [ident diff]]
-     (reduce-kv
-      (fn [acc ident values]
-        (update acc
-                ident
-                (fn [previous-values]
-                  (reduce-kv
-                   (fn [previous-values k {:keys [before after] :as v}]
-                     (if (or after (not (some-> previous-values
-                                                k
-                                                :after)))
-                       (assoc previous-values k v)
-                       (assoc-in previous-values [k :before] before)))
-                   previous-values
-                   values))))
-      acc
-      (ref-updates env schema tempids ident diff)))
-   delta
-   delta))
-
-(defn delta->deletes [{::attr/keys    [key->attribute]
-                       ::rad.sql/keys [connection-pools adapters default-adapter many-to-one-relationships]
-                       :as            env} schema delta]
-  (reduce
-   (fn [acc [[id-key id :as ident] diff]]
-     (let [id-attr (key->attribute id-key)]
-       (if (= schema (::attr/schema id-attr))
-         (if (:delete diff)
-           (let [table-name     (sql.schema/table-name key->attribute id-attr)
-                 id-column-name (sql.schema/column-name id-attr)
-                 stmt (sql/format {:delete-from table-name
-                                   :where [:= (keyword id-column-name) id]})]
-             (update acc :deletes conj stmt))
-           (assoc-in acc [:delta ident] diff))
-         acc)))
-   {:deletes []
-    :delta {}}
-   delta))
+                                          (and (after-set ref-ident)
+                                               (before-set ref-ident))
+                                          acc))
+                                      acc
+                                      (set/union after-set before-set))))
+                          acc)))
+                    acc
+                    attributes))
+          delta
+          delta))
 
 (defn save-form!
+  "Does all the necessary operations to persist mutations from the
+  form delta into the appropriate tables in the appropriate databases"
   [{::attr/keys    [key->attribute]
-    ::rad.sql/keys [connection-pools adapters default-adapter many-to-one-relationships]
+    ::rad.sql/keys [connection-pools adapters default-adapter]
     :as            env} {::rad.form/keys [delta] :as d}]
+  (def env env)
+  (def d d)
   (let [schemas (schemas-for-delta env delta)
+        delta (process-attributes key->attribute delta)
+        _ (def new-d delta)
         result  (atom {:tempids {}})]
-    (log/debug "Saving form across " schemas)
+    (log/debug "Saving form acrosbs " schemas)
     (log/debug "SQL Save of delta " (with-out-str (pprint delta)))
     ;; TASK: Transaction should be opened on all databases at once, so that they all succeed or fail
     (doseq [schema (keys connection-pools)]
       (let [adapter        (get adapters schema default-adapter)
-            ds             (get connection-pools schema)]
-        (jdbc/with-transaction [ds ds]
+            ds             (get connection-pools schema)
+            {:keys [tempids insert-scalars]} (log/spy :trace (delta->scalar-inserts env schema delta)) ; any non-fk column with a tempid
+            update-scalars (log/spy :trace (delta->scalar-updates env tempids schema delta)) ; any non-fk columns on entries with pre-existing id
+            _ (def tt tempids)
+            steps          (concat update-scalars insert-scalars)]
+        (def steps steps)
+        (jdbc/with-transaction [tx ds {:isolation :serializable}]
+          ;; allow relaxed FK constraints until end of txn
           (when adapter
-            (vendor/relax-constraints! adapter ds))
-          ;; doing the scalar inserts
-          ;; in the original library, the statements are pre-calculated.
-          ;; I could not find how to know in advance the IDs of the entities being inserted
-          ;; to resolve the tempids in the other queries with mysql.
-          (let [delta (delta->ref-updates env {} schema delta)
-                _ (log/info :transformed-delta (with-out-str (pprint delta)))
-                {:keys [delta deletes]} (delta->deletes env schema delta)
-                {:keys [tempids delta]} (log/spy :trace (delta->scalar-inserts env ds schema delta))
-                update-scalars (log/spy :trace (delta->scalar-updates (assoc env ::tempids tempids) schema delta))]
-            ;; allow relaxed FK constraints until end of txn
-            (doseq [stmt-with-params (concat deletes update-scalars)]
-              (log/debug :stmt stmt-with-params)
-              (jdbc/execute! ds stmt-with-params))
-            (swap! result update :tempids merge tempids)))))
+            (vendor/relax-constraints! adapter tx))
+          (doseq [stmt-with-params steps]
+            (log/debug stmt-with-params)
+            (jdbc/execute! tx stmt-with-params)))
+        (swap! result update :tempids merge tempids)))
     @result))

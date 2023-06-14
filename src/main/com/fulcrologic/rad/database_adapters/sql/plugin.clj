@@ -10,45 +10,6 @@
 
 (sql.rs/coerce-result-sets!)
 
-(defn relationships [attributes]
-  (let [k->attr             (enc/keys-by ::attr/qualified-key attributes)
-        id-attr->attributes (->> attributes
-                                 (mapcat
-                                  (fn [attribute]
-                                    (for [entity-id (::attr/identities attribute)]
-                                      (assoc attribute ::entity-id (k->attr entity-id)))))
-                                 (group-by ::entity-id))]
-    (->> attributes
-         (filter #(= :one (::attr/cardinality %)))
-         (mapcat
-          (fn [attribute]
-            (for [entity-id (::attr/identities attribute)]
-              (let [target-entity (k->attr (::attr/target attribute))
-                    target-entity-attributes  (id-attr->attributes target-entity)
-                    target-attributes (filter #(and (::attr/cardinality %)
-                                                    (contains? (::attr/identities attribute)
-                                                               (::attr/target %)))
-                                              target-entity-attributes)
-                    _ (when (zero? (count target-attributes))
-                        (throw (ex-info "Target attribute not found for"
-                                        {:attribute attribute})))
-                    _ (when (> (count target-attributes) 1)
-                        (throw (ex-info "More than 1 target attribute not supported"
-                                        {:attribute attribute
-                                         :target-attributes target-attributes})))
-                    target-attribute (first target-attributes)
-                    relationship (if target-attribute
-                                   (keyword (str (name (::attr/cardinality attribute))
-                                                 "-to-"
-                                                 (name (::attr/cardinality target-attribute))))
-                                   :one-to-one)]
-                (assoc attribute
-                       ::entity-id (k->attr entity-id)
-                       :target-attribute target-attribute
-                       :relationship relationship)))))
-         (remove #(= (:relationship %) :one-to-one))
-         (enc/keys-by (comp ::attr/qualified-key :target-attribute)))))
-
 (defn wrap-env
   "Env middleware to add the necessary SQL connections and databases to the pathom env for
    a given request. Requires a database-mapper, which is a
@@ -81,12 +42,10 @@
                                              default-adapter)]
                                (assoc acc schema adapter)))
                            {}
-                           database-configs)
-         one-to-many-relationships (relationships all-attributes)]
+                           database-configs)]
      (fn [env]
        (cond-> (let [database-connection-map (database-mapper env)]
                  (assoc env
-                        ::sql/one-to-many-relationships one-to-many-relationships
                         ::sql/default-adapter default-adapter
                         ::sql/adapters vendor-adapters
                         ::sql/connection-pools database-connection-map))

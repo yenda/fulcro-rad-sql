@@ -12,23 +12,24 @@
     [taoensso.encore :as enc]))
 
 (>defn table-name
-  "Get the table name for a given identity key"
-  ([key->attribute {::attr/keys    [identity? identities]
-                    ::rad.sql/keys [table] :as attr}]
-   [map? ::attr/attribute => string?]
-   (if identity?
-     (table-name attr)
-     (let [identity (first identities)
-           id-attr  (key->attribute identity)]
-       (when-not (= 1 (count identities))
-         (throw (ex-info "Cannot derive table name from ::attr/identities because there is more than one." {})))
-       (table-name id-attr))))
-  ([{::attr/keys    [identity? qualified-key]
-     ::rad.sql/keys [table]}]
-   [::attr/attribute => string?]
-   (when-not identity?
-     (throw (ex-info "You must use an id-attribute with table-name" {:non-id-key qualified-key})))
-   (or table (some-> qualified-key namespace csk/->snake_case))))
+       "Get the table name for a given identity key"
+       ([key->attribute {::attr/keys    [identity? identities]
+                         ::rad.sql/keys [table] :as attr}]
+        [map? ::attr/attribute => string?]
+        (if identity?
+          (table-name attr)
+          (let [identity (first identities)
+                id-attr  (key->attribute identity)]
+            (when-not (= 1 (count identities))
+              (throw (ex-info "Cannot derive table name from ::attr/identities because there is more than one." {})))
+            (table-name id-attr))))
+       ([{::attr/keys    [identity? qualified-key]
+          ::rad.sql/keys [table]}]
+        [::attr/attribute => string?]
+        (when-not identity?
+          (throw (ex-info "You must use an id-attribute with table-name" {:non-id-key qualified-key})))
+        (or (some-> table csk/->snake_case)
+            (some-> qualified-key namespace csk/->snake_case))))
 
 (defn attr->table-name
   "DEPRECATED. use `table-name` on an id attr. This one cannot be correct, since an attr can be on more than one tbl"
@@ -60,10 +61,10 @@
        (throw (ex-info "Cannot calculate column name for to-many ref without k->attr." {:attr qualified-key})))
    (or
     column-name
-    (some-> qualified-key name csk/->snake_case))))
+    (some-> qualified-key name keyword))))
 
 (defn sequence-name [id-attribute]
-  (str (table-name id-attribute) "_" (column-name id-attribute) "_seq"))
+  (str (name (table-name id-attribute)) "_" (name (column-name id-attribute)) "_seq"))
 
 (def attr->column-name column-name)
 

@@ -1,5 +1,6 @@
 (ns com.fulcrologic.rad.database-adapters.sql-options
-  "Options supported by the SQL adapter")
+  "Options supported by the SQL adapter"
+  (:refer-clojure :exclude [ref]))
 
 (def table
   "Attribute option. The name of the database table. Use on `ao/identity? true` attributes.
@@ -15,6 +16,11 @@
   "Attribute option. Required in one-to-one relationship to establish
   on which side references the other. It can be both."
   :com.fulcrologic.rad.database-adapters.sql/owns-ref?)
+
+(def ref
+  "Attribute option. Required in one-to-one relationship to establish
+  on which side references the other. It can be both."
+  :com.fulcrologic.rad.database-adapters.sql/ref)
 
 (def max-length
   "Attribute option. The max length for attributes that are internally represented by strings. This

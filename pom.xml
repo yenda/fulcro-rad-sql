@@ -21,7 +21,7 @@
     <url>https://github.com/fulcrologic/fulcro-rad-sql</url>
     <connection>scm:git:git://github.com/fulcrologic/fulcro-rad-sql.git</connection>
     <developerConnection>scm:git:ssh://git@github.com/fulcrologic/fulcro-rad-sql.git</developerConnection>
-    <tag></tag>
+    <tag/>
   </scm>
   <distributionManagement>
     <repository>
@@ -68,52 +68,52 @@
     <dependency>
       <groupId>org.clojure</groupId>
       <artifactId>clojure</artifactId>
-      <version>1.10.1</version>
+      <version>1.11.1</version>
     </dependency>
     <dependency>
       <groupId>com.fulcrologic</groupId>
       <artifactId>fulcro-rad</artifactId>
-      <version>1.0.27</version>
+      <version>1.5.1</version>
     </dependency>
     <dependency>
       <groupId>com.fulcrologic</groupId>
       <artifactId>guardrails</artifactId>
-      <version>1.1.7</version>
+      <version>1.1.13</version>
     </dependency>
     <dependency>
       <groupId>com.zaxxer</groupId>
       <artifactId>HikariCP</artifactId>
-      <version>3.4.2</version>
+      <version>5.0.1</version>
     </dependency>
     <dependency>
       <groupId>edn-query-language</groupId>
       <artifactId>eql</artifactId>
-      <version>1.0.1</version>
+      <version>2021.07.18</version>
     </dependency>
     <dependency>
       <groupId>com.taoensso</groupId>
       <artifactId>encore</artifactId>
-      <version>2.115.0</version>
+      <version>3.59.0</version>
     </dependency>
     <dependency>
       <groupId>seancorfield</groupId>
       <artifactId>next.jdbc</artifactId>
-      <version>1.0.409</version>
+      <version>1.2.659</version>
     </dependency>
     <dependency>
       <groupId>com.taoensso</groupId>
       <artifactId>timbre</artifactId>
-      <version>4.10.0</version>
+      <version>6.1.0</version>
     </dependency>
     <dependency>
       <groupId>org.flywaydb</groupId>
       <artifactId>flyway-core</artifactId>
-      <version>4.2.0</version>
+      <version>9.19.4</version>
     </dependency>
     <dependency>
       <groupId>camel-snake-kebab</groupId>
       <artifactId>camel-snake-kebab</artifactId>
-      <version>0.4.0</version>
+      <version>0.4.3</version>
     </dependency>
   </dependencies>
 </project>

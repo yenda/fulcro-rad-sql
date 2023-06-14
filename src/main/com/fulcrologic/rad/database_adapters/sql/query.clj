@@ -155,55 +155,6 @@
         resolver-input]
        [any? vector? keyword? coll? => (? coll?)]
        (let [datasource        (or (get connection-pools schema) (throw (ex-info "Data source missing for schema" {:schema schema})))
-             rows                  (log/spy :debug (jdbc/execute! datasource query {:builder-fn row-builder}))]
+             _ (log/debug :query query)
+             rows                  (log/spy :debug :result (jdbc/execute! datasource query {:builder-fn row-builder}))]
          rows))
-
-(>defn eql-query-by-ref!
-       [{::attr/keys    [key->attribute attributes target-attribute]
-         ::rad.sql/keys [connection-pools]
-         :as            env} id-attribute ref-attribute eql-query resolver-input]
-       [any? ::attr/attribute ::attr/attribute ::eql/query coll? => (? coll?)]
-       (let [schema            (::attr/schema id-attribute)
-             datasource        (or (get connection-pools schema) (throw (ex-info "Data source missing for schema" {:schema schema})))
-             id-key (::attr/qualified-key id-attribute) ;; :user/id
-             target-key (::attr/target ref-attribute) ;; :course.administrator/id
-             ref-key (::attr/qualified-key ref-attribute) ;; :user/administrated-courses
-             xoxo (::rad.sql/ref ref-attribute) ;; :course.administrator/user
-             attrs-of-interest attributes #_(eql->attrs env schema eql-query)
-             ;; TODO: something is wrong here
-             ids               (if (map? resolver-input)
-                                 (if-let [id (get resolver-input id-key)] [id] [])
-                                 (vec (keep #(get % id-key) resolver-input)))
-             ]
-         (when (seq ids)
-           (let [[base-query base-attributes] (base-property-query-by-attribute env id-attribute ref-attribute target-attribute attrs-of-interest ids)
-
-                 rows                  (log/spy :debug (sql/query datasource (log/spy :debug [base-query]) {:builder-fn row-builder}))
-                 edn-result (log/spy :debug (sql-results->edn-results rows base-attributes))
-                 results-by-id (log/spy :debug (group-by xoxo edn-result))
-                 results-by-id (reduce-kv (fn [acc k v] (assoc acc {id-key k} {ref-key v})) {} results-by-id)
-                 ]
-             (mapv #(get results-by-id {id-key %}) ids)))))
-
-(>defn eql-query-by-attribute!
-       [{::attr/keys    [key->attribute attributes target-attribute]
-         ::rad.sql/keys [connection-pools]
-         :as            env}
-        {::attr/keys [target] :as relationship-attribute}
-        base-query
-        base-attributes
-        eql-query
-        resolver-input]
-       [any? ::attr/attribute string?  ::attr/attributes ::eql/query coll? => (? coll?)]
-       (let [schema            (::attr/schema relationship-attribute)
-             datasource        (or (get connection-pools schema) (throw (ex-info "Data source missing for schema" {:schema schema})))
-             id-key (::attr/qualified-key relationship-attribute)
-             ids               (if (map? resolver-input)
-                                 (if-let [id (get resolver-input target)] [id] [])
-                                 (vec (keep #(get % target) resolver-input)))]
-         (when (seq ids)
-           (let [id-list     (str/join "," (map q ids))
-                 rows (log/spy :debug (sql/query datasource (log/spy :debug [base-query id-list]) {:builder-fn row-builder}))
-                 edn-result (log/spy :debug (sql-results->edn-results rows base-attributes))]
-             edn-result
-             #_(mapv #(get results-by-id {id-key %}) ids)))))
