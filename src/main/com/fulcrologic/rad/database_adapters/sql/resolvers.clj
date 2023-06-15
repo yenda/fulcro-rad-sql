@@ -136,6 +136,7 @@
    (fn [result [table id]]
      (if (tempid/tempid? id)
        (let [{::attr/keys [type] :as id-attr} (key->attribute table)
+             _ (log/info :id-attr id-attr)
              real-id (if (#{:int :long} type)
                        (:id (first (jdbc/execute! ds [(format "SELECT NEXTVAL('%s') AS id" (sql.schema/sequence-name id-attr))])))
                        (ids/new-uuid))]
@@ -298,11 +299,8 @@
   [{::attr/keys    [key->attribute]
     ::rad.sql/keys [connection-pools adapters default-adapter]
     :as            env} {::rad.form/keys [delta] :as d}]
-  (def env env)
-  (def d d)
   (let [schemas (schemas-for-delta env delta)
         delta (process-attributes key->attribute delta)
-        _ (def new-d delta)
         result  (atom {:tempids {}})]
     (log/debug "Saving form acrosbs " schemas)
     (log/debug "SQL Save of delta " (with-out-str (pprint delta)))
@@ -312,9 +310,7 @@
             ds             (get connection-pools schema)
             {:keys [tempids insert-scalars]} (log/spy :trace (delta->scalar-inserts env schema delta)) ; any non-fk column with a tempid
             update-scalars (log/spy :trace (delta->scalar-updates env tempids schema delta)) ; any non-fk columns on entries with pre-existing id
-            _ (def tt tempids)
             steps          (concat update-scalars insert-scalars)]
-        (def steps steps)
         (jdbc/with-transaction [tx ds {:isolation :serializable}]
           ;; allow relaxed FK constraints until end of txn
           (when adapter

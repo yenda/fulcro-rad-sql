@@ -93,7 +93,10 @@
                                          (let [result
                                                (reduce
                                                 (fn [acc [output-path column]]
-                                                  (assoc-in acc output-path (get row column)))
+                                                  (let [value (get row column)]
+                                                    (if (nil? value)
+                                                      (assoc acc (first output-path) value)
+                                                      (assoc-in acc output-path value))))
                                                 {}
                                                 column-mapping)]
                                            (assoc acc
