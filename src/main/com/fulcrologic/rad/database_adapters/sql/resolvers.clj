@@ -213,43 +213,44 @@
   (when-not (tempid/tempid? id)
     (let [{::attr/keys [type schema] :as id-attr} (key->attribute table)]
       (when (= schema-to-save schema)
-        (let [table-name   (sql.schema/table-name key->attribute id-attr)
-              scalar-attrs (keep
-                             (fn [k] (table-local-attr key->attribute schema-to-save k))
-                             (keys diff))
-              old-val      (fn [{::attr/keys [qualified-key] :as attr}]
-                             (some->> (get-in diff [qualified-key :before])
-                                      (form->sql-value attr)))
-              new-val      (fn [{::attr/keys [qualified-key schema] :as attr}]
-                             (when (= schema schema-to-save)
-                               (let [v (get-in diff [qualified-key :after])
-                                     v (resolve-tempid-in-value tempids v)]
-                                 (form->sql-value attr v))))
-              values (reduce
-                      (fn [result attr]
-                        (let [new      (log/spy :debug (new-val attr))
-                              col-name (keyword (sql.schema/column-name attr))
-                              old      (old-val attr)]
-                          (cond
-                            (= new :delete)
-                            (reduced :delete)
-                            (and old (nil? new))
-                            (assoc result col-name nil)
-
-                            (not (nil? new))
-                            (assoc result col-name new)
-
-                            :else
-                            result)))
-                      {}
-                      scalar-attrs)]
-          (if (= :delete values)
+        (let [table-name   (sql.schema/table-name key->attribute id-attr)]
+          (if (:delete diff)
             (sql/format {:delete-from table-name
                          :where [:= (sql.schema/column-name id-attr) id]})
-            (when (seq values)
-              (sql/format {:update table-name
-                           :set values
-                           :where [:= (sql.schema/column-name id-attr) id]}))))))))
+            (let [scalar-attrs (keep
+                                 (fn [k] (table-local-attr key->attribute schema-to-save k))
+                                 (keys diff))
+                  old-val      (fn [{::attr/keys [qualified-key] :as attr}]
+                                 (some->> (get-in diff [qualified-key :before])
+                                          (form->sql-value attr)))
+                  new-val      (fn [{::attr/keys [qualified-key schema] :as attr}]
+                                 (when (= schema schema-to-save)
+                                   (let [v (get-in diff [qualified-key :after])
+                                         v (resolve-tempid-in-value tempids v)]
+                                     (form->sql-value attr v))))
+                  values (reduce
+                          (fn [result attr]
+                            (let [new      (log/spy :debug (new-val attr))
+                                  col-name (keyword (sql.schema/column-name attr))
+                                  old      (old-val attr)]
+                              (cond
+                                (= new :delete)
+                                (reduced :delete)
+                                (and old (nil? new))
+                                (assoc result col-name nil)
+
+                                (not (nil? new))
+                                (assoc result col-name new)
+
+                                :else
+                                result)))
+                          {}
+                          scalar-attrs)]
+              (def values values)
+              (when (seq values)
+                (sql/format {:update table-name
+                             :set values
+                             :where [:= (sql.schema/column-name id-attr) id]})))))))))
 
 (defn delta->scalar-updates [env tempids schema delta]
   (vec (keep (fn [[ident diff]] (scalar-update env tempids schema ident diff)) delta)))
@@ -302,6 +303,8 @@
   (let [schemas (schemas-for-delta env delta)
         delta (process-attributes key->attribute delta)
         result  (atom {:tempids {}})]
+    (def env env)
+    (def new-d delta)
     (log/debug "Saving form acrosbs " schemas)
     (log/debug "SQL Save of delta " (with-out-str (pprint delta)))
     ;; TASK: Transaction should be opened on all databases at once, so that they all succeed or fail
@@ -309,6 +312,7 @@
       (let [adapter        (get adapters schema default-adapter)
             ds             (get connection-pools schema)
             {:keys [tempids insert-scalars]} (log/spy :trace (delta->scalar-inserts env schema delta)) ; any non-fk column with a tempid
+            _ (def tempids tempids)
             update-scalars (log/spy :trace (delta->scalar-updates env tempids schema delta)) ; any non-fk columns on entries with pre-existing id
             steps          (concat update-scalars insert-scalars)]
         (jdbc/with-transaction [tx ds {:isolation :serializable}]

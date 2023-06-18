@@ -154,7 +154,7 @@
   (let [database-map (some-> config ::rad.sql/databases)]
     (doseq [[dbkey dbconfig] database-map]
       (let [{:sql/keys    [auto-create-missing? schema vendor]
-             :flyway/keys [migrate? migrations]} dbconfig
+             :flyway/keys [migrate? migrations schema]} dbconfig
             ^HikariDataSource pool (get connection-pools dbkey)
             db                     {:datasource pool}]
         (if pool
@@ -166,6 +166,7 @@
                                (.dataSource pool)
                                (.locations (into-array String migrations))
                                (.baselineOnMigrate true)
+                               (.defaultSchema (or schema "public"))
                                (.load))]
                 (log/info "Migration location is set to: " migrations)
                 (.migrate flyway)))
