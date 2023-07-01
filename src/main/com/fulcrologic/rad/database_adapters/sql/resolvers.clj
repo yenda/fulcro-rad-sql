@@ -208,7 +208,7 @@
 
 (defn scalar-update
   [{::keys      [tempids]
-    ::attr/keys [key->attribute] :as env} tempids schema-to-save [table id :as ident] diff]
+    ::attr/keys [key->attribute] :as env} tempids schema-to-save [table id :as ident] {:keys [after] :as diff}]
   (when-not (tempid/tempid? id)
     (let [{::attr/keys [type schema] :as id-attr} (key->attribute table)]
       (when (= schema-to-save schema)
@@ -245,11 +245,13 @@
                                 result)))
                           {}
                           scalar-attrs)]
-              (def values values)
-              (when (seq values)
-                (sql/format {:update table-name
-                             :set values
-                             :where [:= (sql.schema/column-name id-attr) id]})))))))))
+              (if (= :delete values)
+                (sql/format {:delete-from table-name
+                             :where [:= (sql.schema/column-name id-attr) id]})
+                (when (seq values)
+                  (sql/format {:update table-name
+                               :set values
+                               :where [:= (sql.schema/column-name id-attr) id]}))))))))))
 
 (defn delta->scalar-updates [env tempids schema delta]
   (vec (keep (fn [[ident diff]] (scalar-update env tempids schema ident diff)) delta)))
