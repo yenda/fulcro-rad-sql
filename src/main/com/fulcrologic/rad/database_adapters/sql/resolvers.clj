@@ -280,9 +280,11 @@
                                           (and (before-set ref-ident)
                                                (not (after-set ref-ident)))
                                           (assoc-in acc [ref-ident ref] {:before ident
-                                                                         :after (if delete-referent?
-                                                                                  :delete
-                                                                                  nil)})
+                                                                         :after (get-in acc
+                                                                                        [ref-ident ref :after]
+                                                                                        (if delete-referent?
+                                                                                          :delete
+                                                                                          nil))})
 
                                           (and (after-set ref-ident)
                                                (before-set ref-ident))
@@ -301,13 +303,12 @@
   [{::attr/keys    [key->attribute]
     ::rad.sql/keys [connection-pools adapters default-adapter]
     :as            env} {::rad.form/keys [delta] :as d}]
+  (log/debug "SQL Save of delta " (with-out-str (pprint delta)))
   (let [schemas (schemas-for-delta env delta)
         delta (process-attributes key->attribute delta)
         result  (atom {:tempids {}})]
-    (def env env)
-    (def new-d delta)
-    (log/debug "Saving form acrosbs " schemas)
-    (log/debug "SQL Save of delta " (with-out-str (pprint delta)))
+    (log/debug "Saving form across " schemas)
+    (log/debug "SQL Save of processed delta " (with-out-str (pprint delta)))
     ;; TASK: Transaction should be opened on all databases at once, so that they all succeed or fail
     (doseq [schema (keys connection-pools)]
       (let [adapter        (get adapters schema default-adapter)
