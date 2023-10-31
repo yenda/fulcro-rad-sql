@@ -237,7 +237,6 @@
       (let [adapter        (get adapters schema default-adapter)
             ds             (get connection-pools schema)
             {:keys [tempids insert-scalars]} (log/spy :trace (delta->scalar-inserts env schema delta)) ; any non-fk column with a tempid
-            _ (def tempids tempids)
             update-scalars (log/spy :trace (delta->scalar-updates env tempids schema delta)) ; any non-fk columns on entries with pre-existing id
             steps          (concat update-scalars insert-scalars)]
         (jdbc/with-transaction [tx ds {:isolation :serializable}]
