@@ -183,8 +183,10 @@
                         id-attr->attributes
                         k->attr]
   (if-not ref
-    ;; the attr-k is already resolved by the id-resolver
-    ;; we only need to add an alias
+    ;; when there is no ref that means that the table has a
+    ;; column with the ref.
+    ;; so we only need to alias that ref attribute to reuse
+    ;; the id-resolver of the ref entity.
     (pbir/alias-resolver (to-one-keyword attr-k) target-k)
     (let [{::attr/keys [schema]
            ::pco/keys [transform]} attr
@@ -252,7 +254,12 @@
                                     (for [entity-id (::attr/identities attribute)]
                                       (assoc attribute ::entity-id (k->attr entity-id)))))
                                  (group-by ::entity-id))
-        _ (log/debug "Generating resolvers")
+        ;; id-resolvers are basically a get by id, but they also handle batches, so that
+        ;; one can ask for more than one id in a single query.
+        ;; - we build one id resolver for each id attribute defined
+        ;; - each resolvers grabs all the attributes defined for that particular identity
+        ;; in the select clause.
+        _ (log/debug "Generating resolvers for id attributes")
         id-resolvers
         (reduce-kv
          (fn [resolvers id-attr attributes]
@@ -263,6 +270,8 @@
          []
          id-attr->attributes)
 
+        ;; there are two types of target resolvers: one and many
+        ;;
         target-resolvers
         (->> attributes
              (filter #(and

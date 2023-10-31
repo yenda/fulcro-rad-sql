@@ -1,106 +1,29 @@
 (ns com.fulcrologic.rad.database-adapters.sql.resolvers
   (:require
-    [clojure.pprint :refer [pprint]]
-    [com.fulcrologic.rad.authorization :as auth]
-    [com.fulcrologic.rad.attributes :as attr]
-    [com.fulcrologic.rad.form :as rad.form]
-    [com.fulcrologic.rad.options-util :refer [?!]]
-    [com.fulcrologic.guardrails.core :refer [>defn => |]]
-    [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
-    [com.fulcrologic.rad.database-adapters.sql.query :as sql.query]
-    [com.fulcrologic.rad.database-adapters.sql.schema :as sql.schema]
-    [taoensso.encore :as enc]
-    [taoensso.timbre :as log]
-    [next.jdbc.sql :as jdbc.sql]
-    [honey.sql :as sql]
-    [clojure.spec.alpha :as s]
-    [next.jdbc :as jdbc]
-
-    ;; IMPORTANT: This turns on instant coercion:
-    [next.jdbc.date-time]
-
-    [com.fulcrologic.fulcro.algorithms.tempid :as tempid]
-    [com.fulcrologic.rad.ids :as ids]
-    [clojure.string :as str]
-    [clojure.set :as set]
-    [edn-query-language.core :as eql]
-    [com.fulcrologic.rad.database-adapters.sql.vendor :as vendor]
-    [com.fulcrologic.rad.attributes :as rad.attr]))
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Reads
-
-(defn entity-query
-  "The entity query used by the pathom resolvers."
-  [{::attr/keys [id-attribute key->attribute] :as env} input]
-  (enc/if-let [query* (get env ::rad.sql/default-query)]
-    (let [result (sql.query/eql-query! env id-attribute query* input)]
-      result)
-    (do
-      (log/info "Unable to complete query.")
-      nil)))
-
-(>defn attributes->eql
-       "Returns an EQL query for all of the attributes that are available for the given database-id"
-       [attrs]
-       [::attributes => vector?]
-       (reduce
-        (fn [outs {::keys [qualified-key type target cardinality]}]
-          (if (= :many cardinality)
-            outs
-            (conj outs qualified-key)))
-        []
-        attrs))
-
-
-(defn id-resolver [{::attr/keys [id-attribute attributes k->attr]}]
-  (enc/if-let [id-key  (::attr/qualified-key id-attribute)
-               outputs (attributes->eql attributes)
-               schema  (::attr/schema id-attribute)]
-    (let [transform (:com.wsscode.pathom.connect/transform id-attribute)]
-      (cond-> {:com.wsscode.pathom.connect/sym     (symbol
-                                                    (str (namespace id-key))
-                                                    (str (name id-key) "-resolver"))
-               :com.wsscode.pathom.connect/output  outputs
-               :com.wsscode.pathom.connect/batch?  true
-               :com.wsscode.pathom.connect/resolve (fn [env input]
-                                                     (auth/redact env
-                                                                  (log/spy :trace (entity-query
-                                                                                   (assoc env
-                                                                                          ::attr/id-attribute id-attribute
-                                                                                          ::attr/schema schema
-                                                                                          ::rad.sql/default-query outputs)
-                                                                                   (log/spy :trace input)))))
-               :com.wsscode.pathom.connect/input   #{id-key}}
-        transform transform))
-    (log/error
-     "Unable to generate id-resolver. Attribute was missing schema, "
-     "or could not be found" (::attr/qualified-key id-attribute))))
-
-
-(defn generate-resolvers
-  "Returns a sequence of resolvers that can resolve attributes from
-  SQL databases."
-  [attributes schema]
-  (log/info "Generating resolvers for SQL schema" schema)
-  (let [k->attr             (enc/keys-by ::attr/qualified-key attributes)
-        id-attr->attributes (->> attributes
-                              (filter #(= schema (::attr/schema %)))
-                              (mapcat
-                                (fn [attribute]
-                                  (for [entity-id (::attr/identities attribute)]
-                                    (assoc attribute ::entity-id (k->attr entity-id)))))
-                              (group-by ::entity-id))]
-    (log/info "Generating resolvers")
-    (reduce-kv
-      (fn [resolvers id-attr attributes]
-        (log/info "Generating resolver for id key" (::attr/qualified-key id-attr)
-          "to resolve" (mapv ::attr/qualified-key attributes))
-        (conj resolvers (id-resolver {::attr/id-attribute id-attr
-                                      ::attr/attributes   attributes
-                                      ::attr/k->attr      k->attr})))
-      [] id-attr->attributes)))
-
+   [clojure.pprint :refer [pprint]]
+   [clojure.set :as set]
+   [clojure.spec.alpha :as s]
+   [clojure.string :as str]
+   [com.fulcrologic.fulcro.algorithms.tempid :as tempid]
+   [com.fulcrologic.guardrails.core :refer [>defn => |]]
+   [com.fulcrologic.rad.attributes :as attr]
+   [com.fulcrologic.rad.attributes :as rad.attr]
+   [com.fulcrologic.rad.authorization :as auth]
+   [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
+   [com.fulcrologic.rad.database-adapters.sql.query :as sql.query]
+   [com.fulcrologic.rad.database-adapters.sql.schema :as sql.schema]
+   [com.fulcrologic.rad.database-adapters.sql.vendor :as vendor]
+   [com.fulcrologic.rad.form :as rad.form]
+   [com.fulcrologic.rad.ids :as ids]
+   [com.fulcrologic.rad.options-util :refer [?!]]
+   [edn-query-language.core :as eql]
+   [honey.sql :as sql]
+   [next.jdbc :as jdbc]
+   ;; IMPORTANT: This turns on instant coercion:
+   [next.jdbc.date-time]
+   [next.jdbc.sql :as jdbc.sql]
+   [taoensso.encore :as enc]
+   [taoensso.timbre :as log]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Writes
