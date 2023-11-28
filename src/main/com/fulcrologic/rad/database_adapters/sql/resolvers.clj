@@ -2,28 +2,20 @@
   (:require
    [clojure.pprint :refer [pprint]]
    [clojure.set :as set]
-   [clojure.spec.alpha :as s]
-   [clojure.string :as str]
    [com.fulcrologic.fulcro.algorithms.tempid :as tempid]
-   [com.fulcrologic.guardrails.core :refer [>defn => |]]
    [com.fulcrologic.rad.attributes :as attr]
-   [com.fulcrologic.rad.attributes :as rad.attr]
-   [com.fulcrologic.rad.authorization :as auth]
    [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
-   [com.fulcrologic.rad.database-adapters.sql.query :as sql.query]
    [com.fulcrologic.rad.database-adapters.sql.schema :as sql.schema]
    [com.fulcrologic.rad.database-adapters.sql.vendor :as vendor]
    [com.fulcrologic.rad.form :as rad.form]
    [com.fulcrologic.rad.ids :as ids]
-   [com.fulcrologic.rad.options-util :refer [?!]]
    [edn-query-language.core :as eql]
    [honey.sql :as sql]
    [next.jdbc :as jdbc]
-   ;; IMPORTANT: This turns on instant coercion:
-   [next.jdbc.date-time]
-   [next.jdbc.sql :as jdbc.sql]
-   [taoensso.encore :as enc]
-   [taoensso.timbre :as log]))
+   [taoensso.timbre :as log]
+   [diehard.core :as dh])
+  (:import
+   (org.postgresql.util PSQLException)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Writes
@@ -40,18 +32,18 @@
 (def keys-in-delta
   (fn keys-in-delta [delta]
     (let [id-keys  (into #{}
-                     (map first)
-                     (keys delta))
+                         (map first)
+                         (keys delta))
           all-keys (into id-keys
-                     (mapcat keys)
-                     (vals delta))]
+                         (mapcat keys)
+                         (vals delta))]
       all-keys)))
 
 (defn schemas-for-delta [{::attr/keys [key->attribute]} delta]
   (let [all-keys (keys-in-delta delta)
         schemas  (into #{}
-                   (keep #(-> % key->attribute ::attr/schema))
-                   all-keys)]
+                       (keep #(-> % key->attribute ::attr/schema))
+                       all-keys)]
     schemas))
 
 (defn- generate-tempids [ds key->attribute delta]
@@ -100,9 +92,9 @@
         (let [table-name    (sql.schema/table-name key->attribute id-attr)
               real-id       (get tempids id id)
               scalar-attrs  (keep
-                              (fn [k]
-                                (table-local-attr key->attribute schema-to-save k))
-                              (keys diff))
+                             (fn [k]
+                               (table-local-attr key->attribute schema-to-save k))
+                             (keys diff))
               new-val       (fn [{::attr/keys [qualified-key schema] :as attr}]
                               (when (= schema schema-to-save)
                                 (let [v (get-in diff [qualified-key :after])
@@ -118,7 +110,7 @@
           (sql/format {:insert-into table-name
                        :values [values]
                        :returning [:*]}))
-        (log/debug "Schemas do not match. Not updating" ident)        ))))
+        (log/debug "Schemas do not match. Not updating" ident)))))
 
 (defn delta->scalar-inserts [{::attr/keys    [key->attribute]
                               ::rad.sql/keys [connection-pools]
@@ -140,8 +132,8 @@
             (sql/format {:delete-from table-name
                          :where [:= (sql.schema/column-name id-attr) id]})
             (let [scalar-attrs (keep
-                                 (fn [k] (table-local-attr key->attribute schema-to-save k))
-                                 (keys diff))
+                                (fn [k] (table-local-attr key->attribute schema-to-save k))
+                                (keys diff))
                   old-val      (fn [{::attr/keys [qualified-key] :as attr}]
                                  (some->> (get-in diff [qualified-key :before])
                                           (form->sql-value attr)))
@@ -182,8 +174,8 @@
 (defn process-attributes [key->attribute delta]
   (reduce (fn [acc [ident attributes]]
             (reduce (fn [acc [attr-k value]]
-                      (let [{::rad.attr/keys [type cardinality]
-                             ::rad.sql/keys [ref delete-referent?] :as attribute                             }
+                      (let [{::attr/keys [type cardinality]
+                             ::rad.sql/keys [ref delete-referent?] :as attribute}
                             (key->attribute attr-k)
                             {:keys [before after]} value]
                         (if (and ref
@@ -220,6 +212,20 @@
           delta
           delta))
 
+(defn error-condition
+  "Return the error condition from an error by looking up the error code.
+  Add new error code when needed from here:
+  https://www.postgresql.org/docs/12/errcodes-appendix.html"
+  [^PSQLException e]
+  (case (.getSQLState e)
+    "08003" ::connection-does-not-exist
+    "23505" ::unique-violation
+    "23514" ::check-violation
+    "57014" ::timeout
+    "23502" ::not-null-violation
+    "40001" ::serialization-failure
+    ::unknown))
+
 (defn save-form!
   "Does all the necessary operations to persist mutations from the
   form delta into the appropriate tables in the appropriate databases"
@@ -239,12 +245,21 @@
             {:keys [tempids insert-scalars]} (log/spy :trace (delta->scalar-inserts env schema delta)) ; any non-fk column with a tempid
             update-scalars (log/spy :trace (delta->scalar-updates env tempids schema delta)) ; any non-fk columns on entries with pre-existing id
             steps          (concat update-scalars insert-scalars)]
-        (jdbc/with-transaction [tx ds {:isolation :serializable}]
-          ;; allow relaxed FK constraints until end of txn
-          (when adapter
-            (vendor/relax-constraints! adapter tx))
-          (doseq [stmt-with-params steps]
-            (log/debug stmt-with-params)
-            (jdbc/execute! tx stmt-with-params)))
+        (dh/with-retry
+          {:retry-if (fn [_return-value exception-thrown]
+                       (if (and exception-thrown
+                                (instance? PSQLException exception-thrown)
+                                (= ::serialization-failure (error-condition exception-thrown)))
+                         true
+                         false))
+           :max-retries 4
+           :backoff-ms [100 200 2.0]}
+          (jdbc/with-transaction [tx ds {:isolation :serializable}]
+         ;; allow relaxed FK constraints until end of txn
+            (when adapter
+              (vendor/relax-constraints! adapter tx))
+            (doseq [stmt-with-params steps]
+              (log/debug stmt-with-params)
+              (jdbc/execute! tx stmt-with-params))))
         (swap! result update :tempids merge tempids)))
     @result))
