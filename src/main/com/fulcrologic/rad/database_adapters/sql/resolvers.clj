@@ -144,7 +144,7 @@
                                      (form->sql-value attr v))))
                   values (reduce
                           (fn [result attr]
-                            (let [new      (log/spy :debug (new-val attr))
+                            (let [new      (log/spy :trace (new-val attr))
                                   col-name (keyword (sql.schema/column-name attr))
                                   old      (old-val attr)]
                               (cond
@@ -232,12 +232,13 @@
   [{::attr/keys    [key->attribute]
     ::rad.sql/keys [connection-pools adapters default-adapter]
     :as            env} {::rad.form/keys [delta] :as d}]
-  (log/debug "SQL Save of delta " (with-out-str (pprint delta)))
-  (let [schemas (schemas-for-delta env delta)
+  (let [delta-before (with-out-str (pprint delta))
+        schemas (schemas-for-delta env delta)
         delta (process-attributes key->attribute delta)
         result  (atom {:tempids {}})]
-    (log/debug "Saving form across " schemas)
-    (log/debug "SQL Save of processed delta " (with-out-str (pprint delta)))
+    (log/debug "Saving form across " schemas
+               {:delta delta-before
+                :processed-delta (with-out-str (pprint delta))})
     ;; TASK: Transaction should be opened on all databases at once, so that they all succeed or fail
     (doseq [schema (keys connection-pools)]
       (let [adapter        (get adapters schema default-adapter)
@@ -259,7 +260,8 @@
             (when adapter
               (vendor/relax-constraints! adapter tx))
             (doseq [stmt-with-params steps]
-              (log/debug stmt-with-params)
+              (log/debug "save-form!"
+                         {:stmt-with-params stmt-with-params})
               (jdbc/execute! tx stmt-with-params))))
         (swap! result update :tempids merge tempids)))
     @result))

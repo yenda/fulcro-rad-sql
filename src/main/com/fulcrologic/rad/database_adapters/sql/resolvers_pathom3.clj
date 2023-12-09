@@ -75,41 +75,44 @@
           (pco/resolver
            op-name
            (cond->
-               {::pco/output outputs
-                ::pco/batch?  true
-                ::pco/resolve
-                (fn [env input]
+            {::pco/output outputs
+             ::pco/batch?  true
+             ::pco/resolve
+             (fn [env input]
+               (sql.query/timer
+                "id-resolver"
+                (let [ids (mapv id-attr-k input)
+                      query (sql/format {:select columns
+                                         :from table
+                                         :where [:in id-column ids]})
+                      rows (sql.query/eql-query! env
+                                                 query
+                                                 schema
+                                                 input)
+                      results-by-id       (reduce
+                                           (fn [acc row]
+                                             (let [result
+                                                   (reduce
+                                                    (fn [acc [output-path column]]
+                                                      (let [value (get row column)]
+                                                  ;; if ref we don't return it
+                                                        (if (and (nil? value) (= (count output-path) 2))
+                                                          acc
+                                                          (assoc-in acc output-path value))))
+                                                    {}
+                                                    column-mapping)]
+                                               (assoc acc
+                                                      (id-attr-k result)
+                                                      result)))
+                                           {}
+                                           rows)
 
-                  (let [ids (mapv id-attr-k input)
-                        query (sql/format {:select columns
-                                           :from table
-                                           :where [:in id-column ids]})
-                        rows (sql.query/eql-query! env
-                                                   query
-                                                   schema
-                                                   input)
-                        results-by-id (reduce
-                                       (fn [acc row]
-                                         (let [result
-                                               (reduce
-                                                (fn [acc [output-path column]]
-                                                  (let [value (get row column)]
-                                                    ;; if ref we don't return it
-                                                    (if (and (nil? value) (= (count output-path) 2))
-                                                      acc
-                                                      (assoc-in acc output-path value))))
-                                                {}
-                                                column-mapping)]
-                                           (assoc acc
-                                                  (id-attr-k result)
-                                                  result)))
-                                       {}
-                                       rows)
-                        results (mapv (fn [id]
-                                        (get results-by-id id)) ids)]
-                    (auth/redact env
-                                 results)))
-                ::pco/input [id-attr-k]}
+                      results (mapv (fn [id]
+                                      (get results-by-id id)) ids)]
+                  (auth/redact env
+                               results))
+                {:op-name op-name}))
+             ::pco/input [id-attr-k]}
              transform (assoc ::pco/transform transform)))]
       id-resolver)))
 
@@ -148,28 +151,29 @@
                   ::pco/batch?  true
                   ::pco/resolve
                   (fn [env input]
-                    (let [ids (mapv id-attr-k input)
-                          query (log/spy :debug
-                                         :to-many-query
-                                         (sql/format
-                                          {:select select
-                                           :from table
-                                           :where [:in relationship-column ids]
-                                           :group-by [relationship-column]}))
-                          rows (sql.query/eql-query! env
-                                                     query
-                                                     schema
-                                                     input)
-                          results-by-id (reduce (fn [acc {:keys [k v]}]
-                                                  (assoc acc k
-                                                         {attr-k (mapv (fn [v]
-                                                                         {target-k v})
-                                                                       v)}))
-                                                {}
-                                                rows)
-                          results (mapv #(get results-by-id %) ids)]
+                    (sql.query/timer
+                     "to-many-resolver"
+                     (let [ids (mapv id-attr-k input)
+                           query (sql/format
+                                  {:select select
+                                   :from table
+                                   :where [:in relationship-column ids]
+                                   :group-by [relationship-column]})
+                           rows (sql.query/eql-query! env
+                                                      query
+                                                      schema
+                                                      input)
+                           results-by-id (reduce (fn [acc {:keys [k v]}]
+                                                   (assoc acc k
+                                                          {attr-k (mapv (fn [v]
+                                                                          {target-k v})
+                                                                        v)}))
+                                                 {}
+                                                 rows)
+                           results (mapv #(get results-by-id %) ids)]
 
-                      (auth/redact env results)))
+                       (auth/redact env results))
+                     {:op-name op-name}))
                   ::pco/input [id-attr-k]}
            transform (assoc ::pco/transform transform)))]
     entity-by-attribute-resolver))
@@ -205,39 +209,39 @@
           (pco/resolver
            op-name
            (cond->
-               {::pco/output (conj outputs {attr-k outputs})
-                ::pco/batch?  true
-                ::pco/resolve
-                (fn [env input]
+            {::pco/output (conj outputs {attr-k outputs})
+             ::pco/batch?  true
+             ::pco/resolve
+             (fn [env input]
 
-                  (let [ids (mapv id-attr-k input)
-                        query (sql/format {:select columns
-                                           :from table
-                                           :where [:in ref-column ids]})
-                        rows (sql.query/eql-query! env
-                                                   query
-                                                   schema
-                                                   input)
-                        results-by-id (reduce
-                                       (fn [acc row]
-                                         (let [result
-                                               (reduce
-                                                (fn [acc [output-path column]]
-                                                  (assoc-in acc output-path (get row column)))
-                                                {}
-                                                column-mapping)]
-                                           (assoc acc
-                                                  (get-in result [ref id-attr-k])
-                                                  result)))
-                                       {}
-                                       rows)
-                        results (mapv (fn [id]
-                                        (when-let [outputs (get results-by-id id)]
-                                          (assoc outputs attr-k outputs)))
-                                      ids)]
-                    (auth/redact env
-                                 results)))
-                ::pco/input [id-attr-k]}
+               (let [ids (mapv id-attr-k input)
+                     query (sql/format {:select columns
+                                        :from table
+                                        :where [:in ref-column ids]})
+                     rows (sql.query/eql-query! env
+                                                query
+                                                schema
+                                                input)
+                     results-by-id (reduce
+                                    (fn [acc row]
+                                      (let [result
+                                            (reduce
+                                             (fn [acc [output-path column]]
+                                               (assoc-in acc output-path (get row column)))
+                                             {}
+                                             column-mapping)]
+                                        (assoc acc
+                                               (get-in result [ref id-attr-k])
+                                               result)))
+                                    {}
+                                    rows)
+                     results (mapv (fn [id]
+                                     (when-let [outputs (get results-by-id id)]
+                                       (assoc outputs attr-k outputs)))
+                                   ids)]
+                 (auth/redact env
+                              results)))
+             ::pco/input [id-attr-k]}
              transform (assoc ::pco/transform transform)))]
       one-to-one-resolver)))
 
@@ -288,6 +292,5 @@
                     :many (to-many-resolvers attribute
                                              id-attr-k
                                              id-attr->attributes
-                                             k->attr)))))
-             )]
+                                             k->attr))))))]
     (vec (concat id-resolvers target-resolvers))))
