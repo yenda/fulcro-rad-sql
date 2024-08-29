@@ -182,10 +182,20 @@
                                  (not (= before after nil)))
                           (case cardinality
                             :one
-                            (assoc-in acc [(:after value) ref] {:after ident})
+                            (if (:after value)
+                              (assoc-in acc [(:after value) ref] {:after ident})
+                                  ;; if the relation has been removed and the `delete-referent?`
+                                  ;; is true the referenced row will be deleted
+                              (assoc-in acc [(:before value) ref] {:before ident
+                                                                   :after (if delete-referent?
+                                                                            :delete
+                                                                            nil)}))
                             :many
                             (let [after-set (into #{} after)
                                   before-set (into #{} before)]
+
+                              ;; check if a given ref-ident has been added or removed
+                              ;; from the to-many relationship
                               (reduce (fn [acc ref-ident]
                                         (cond
                                           (and (after-set ref-ident)
@@ -194,12 +204,15 @@
 
                                           (and (before-set ref-ident)
                                                (not (after-set ref-ident)))
-                                          (assoc-in acc [ref-ident ref] {:before ident
-                                                                         :after (get-in acc
-                                                                                        [ref-ident ref :after]
-                                                                                        (if delete-referent?
-                                                                                          :delete
-                                                                                          nil))})
+                                          (assoc-in acc [ref-ident ref]
+                                                    {:before ident
+                                                     :after (get-in acc
+                                                                    [ref-ident ref :after]
+                                                                    ;; if it has been removed and the `delete-referent?`
+                                                                    ;; is true the referenced row will be deleted
+                                                                    (if delete-referent?
+                                                                      :delete
+                                                                      nil))})
 
                                           (and (after-set ref-ident)
                                                (before-set ref-ident))
