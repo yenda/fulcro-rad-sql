@@ -136,6 +136,10 @@
         table (get-table target-attr)
         ref-attr (or (k->attr ref)
                      (throw (ex-info "Ref attribute not found" attr)))
+        _ (when (= (::attr/cardinality ref-attr)
+                   :many)
+            (throw (ex-info "Many to many relations are not implemented" {:target-attr target-attr
+                                                                          :ref-attr ref-attr})))
         relationship-column (get-column ref-attr)
         target-column (get-column target-attr)
         order-by (some-> (::rad.sql/order-by attr)
