@@ -8,9 +8,21 @@
    [com.fulcrologic.rad.database-adapters.sql.query :as sql.query]
    [com.wsscode.pathom3.connect.built-in.resolvers :as pbir]
    [com.wsscode.pathom3.connect.operation :as pco]
+   [hyperfiddle.rcf :refer [tests]]
    [honey.sql :as sql]
    [taoensso.encore :as enc]
    [taoensso.timbre :as log]))
+
+(defn reorder-maps-by-id
+  "TODO benchmark this against reduce"
+  [id-key order-vec target-vec]
+  (let [id-map (into {} (map (juxt id-key identity)) target-vec)]
+    (mapv #(get id-map (id-key %) %) order-vec)))
+
+(tests
+ (def order-vec [{:l/id 3} {:l/id 10} {:l/id "w"} {:l/id 1}])
+ (def target-vec [{:l/id 1 :value "a"} {:l/id "w" :value "b"} {:l/id 3 :value "c"}])
+ (reorder-maps-by-id :l/id order-vec target-vec) := [{:l/id 3 :value "c"} {:l/id 10} {:l/id "w" :value "b"} {:l/id 1 :value "a"}])
 
 (defn get-column [attribute]
   (or (::rad.sql/column-name attribute)
@@ -119,68 +131,69 @@
 (defn to-many-resolvers
   [{::attr/keys [schema]
     ::rad.sql/keys [ref] ;; user/organization
-    ::pco/keys [transform] :as attr
+    ::pco/keys [resolve transform] :as attr
     attr-k ::attr/qualified-key ;; organization/users
     target-k ::attr/target} ;; user/id
    id-attr-k ;; organization/id
    id-attr->attributes
    k->attr]
-  (when-not ref
-    (throw (ex-info "Missing ref in to-many ref" attr)))
-  (let [op-name (symbol
-                 (str (namespace attr-k))
-                 (str (name attr-k) "-resolver"))
-        _ (log/debug "Building Pathom3 resolver" op-name "for" attr-k "by" id-attr-k)
-        target-attr (or (k->attr target-k)
-                        (throw (ex-info "Target attribute not found" attr)))
-        table (get-table target-attr)
-        ref-attr (or (k->attr ref)
-                     (throw (ex-info "Ref attribute not found" attr)))
-        _ (when (= (::attr/cardinality ref-attr)
-                   :many)
-            (throw (ex-info "Many to many relations are not implemented" {:target-attr target-attr
-                                                                          :ref-attr ref-attr})))
-        relationship-column (get-column ref-attr)
-        target-column (get-column target-attr)
-        order-by (some-> (::rad.sql/order-by attr)
-                         k->attr
-                         get-column)
-        select [[relationship-column :k] [[:array_agg (if order-by
-                                                        [:order-by target-column order-by]
-                                                        target-column)] :v]]
-        entity-by-attribute-resolver
-        (pco/resolver
-         op-name
-         (cond-> {::pco/output  [{attr-k [target-k]}]
-                  ::pco/batch?  true
-                  ::pco/resolve
-                  (fn [env input]
-                    (sql.query/timer
-                     "to-many-resolver"
-                     (let [ids (mapv id-attr-k input)
-                           query (sql/format
-                                  {:select select
-                                   :from table
-                                   :where [:in relationship-column ids]
-                                   :group-by [relationship-column]})
-                           rows (sql.query/eql-query! env
-                                                      query
-                                                      schema
-                                                      input)
-                           results-by-id (reduce (fn [acc {:keys [k v]}]
-                                                   (assoc acc k
-                                                          {attr-k (mapv (fn [v]
-                                                                          {target-k v})
-                                                                        v)}))
-                                                 {}
-                                                 rows)
-                           results (mapv #(get results-by-id %) ids)]
+  (when-not resolve
+    (when-not ref
+      (throw (ex-info "Missing ref in to-many ref" attr)))
+    (let [op-name (symbol
+                   (str (namespace attr-k))
+                   (str (name attr-k) "-resolver"))
+          _ (log/debug "Building Pathom3 resolver" op-name "for" attr-k "by" id-attr-k)
+          target-attr (or (k->attr target-k)
+                          (throw (ex-info "Target attribute not found" attr)))
+          table (get-table target-attr)
+          ref-attr (or (k->attr ref)
+                       (throw (ex-info "Ref attribute not found" attr)))
+          _ (when (= (::attr/cardinality ref-attr)
+                     :many)
+              (throw (ex-info "Many to many relations are not implemented" {:target-attr target-attr
+                                                                            :ref-attr ref-attr})))
+          relationship-column (get-column ref-attr)
+          target-column (get-column target-attr)
+          order-by (some-> (::rad.sql/order-by attr)
+                           k->attr
+                           get-column)
+          select [[relationship-column :k] [[:array_agg (if order-by
+                                                          [:order-by target-column order-by]
+                                                          target-column)] :v]]
+          entity-by-attribute-resolver
+          (pco/resolver
+           op-name
+           (cond-> {::pco/output  [{attr-k [target-k]}]
+                    ::pco/batch?  true
+                    ::pco/resolve
+                    (fn [env input]
+                      (sql.query/timer
+                       "to-many-resolver"
+                       (let [ids (mapv id-attr-k input)
+                             query (sql/format
+                                    {:select select
+                                     :from table
+                                     :where [:in relationship-column ids]
+                                     :group-by [relationship-column]})
+                             rows (sql.query/eql-query! env
+                                                        query
+                                                        schema
+                                                        input)
+                             results-by-id (reduce (fn [acc {:keys [k v]}]
+                                                     (assoc acc k
+                                                            {attr-k (mapv (fn [v]
+                                                                            {target-k v})
+                                                                          v)}))
+                                                   {}
+                                                   rows)
+                             results (mapv #(get results-by-id %) ids)]
 
-                       (auth/redact env results))
-                     {:op-name op-name}))
-                  ::pco/input [id-attr-k]}
-           transform (assoc ::pco/transform transform)))]
-    entity-by-attribute-resolver))
+                         (auth/redact env results))
+                       {:op-name op-name}))
+                    ::pco/input [id-attr-k]}
+             transform (assoc ::pco/transform transform)))]
+      entity-by-attribute-resolver)))
 
 (defn to-one-resolvers [{::attr/keys [schema]
                          ::pco/keys [transform] :as attr
@@ -296,5 +309,10 @@
                     :many (to-many-resolvers attribute
                                              id-attr-k
                                              id-attr->attributes
-                                             k->attr))))))]
+                                             k->attr)))))
+             ;; removing the resolvers that were not built.  for
+             ;; instance it could be a manually written one that
+             ;; doesn't need to be generated for a particular to-many
+             ;; relationship
+             (remove nil?))]
     (vec (concat id-resolvers target-resolvers))))
